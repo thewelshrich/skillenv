@@ -52,7 +52,7 @@ function splitRef(input: string): { source: string; ref?: string } {
 
 function gitUrl(input: string): { url: string; ref?: string } | null {
   const { source, ref } = splitRef(input);
-  if (/^[\w.-]+\/[\w.-]+$/.test(source)) {
+  if (!source.startsWith("./") && !source.startsWith("../") && /^[\w.-]+\/[\w.-]+$/.test(source)) {
     return { url: `https://github.com/${source.replace(/\.git$/, "")}.git`, ref };
   }
   if (/^(https?:\/\/|ssh:\/\/|file:\/\/|git@)/.test(source)) return { url: source, ref };
@@ -75,7 +75,9 @@ async function candidateAt(directory: string, root: string, fallbackName = basen
   const skillFile = join(directory, "SKILL.md");
   if (!(await pathExists(skillFile))) return null;
   const fileStat = await lstat(skillFile);
-  if (!fileStat.isFile() || fileStat.isSymbolicLink()) throw new SkillenvError(`Invalid SKILL.md at ${relative(root, skillFile)}`, "INVALID_SKILL");
+  const sourcePath = terminalSafeLine(relative(root, directory) || ".");
+  const displaySkillFile = terminalSafeLine(relative(root, skillFile));
+  if (!fileStat.isFile() || fileStat.isSymbolicLink()) throw new SkillenvError(`Invalid SKILL.md at ${displaySkillFile}`, "INVALID_SKILL");
   try {
     const metadata = frontmatter(await readFile(skillFile, "utf8"));
     const name = nameSchema.parse(typeof metadata.name === "string" ? metadata.name : fallbackName);
@@ -83,11 +85,11 @@ async function candidateAt(directory: string, root: string, fallbackName = basen
       name,
       description: typeof metadata.description === "string" ? terminalSafeLine(metadata.description) : "No description provided",
       directory,
-      sourcePath: relative(root, directory) || ".",
+      sourcePath,
     };
   } catch (error) {
     if (error instanceof SkillenvError) throw error;
-    throw new SkillenvError(`Invalid SKILL.md metadata at ${relative(root, skillFile)}`, "INVALID_SKILL");
+    throw new SkillenvError(`Invalid SKILL.md metadata at ${displaySkillFile}`, "INVALID_SKILL");
   }
 }
 

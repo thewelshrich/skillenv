@@ -213,7 +213,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
   );
 
   for (const entry of planned) {
-    const destination = join(project.root, entry.path);
+    const destination = await checkedManagedPath(project.root, entry.path, entry.skill);
     if ((await pathExists(destination)) && !previousPaths.has(entry.path)) {
       throw new SkillenvError(`Refusing to overwrite unmanaged skill: ${entry.path}`);
     }
@@ -223,7 +223,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
   const backupRoot = join(stagingRoot, "backup");
   const journalPath = join(stagingRoot, "journal.json");
   const staged: Array<{ skill: string; path: string; stagedPath: string; hash: string }> = [];
-  const installed: string[] = [];
+  const installed: Array<{ skill: string; path: string }> = [];
   const backedUp: Array<{ skill: string; path: string; backupPath: string }> = [];
   const journal: ActivationJournal = { version: 1, phase: "prepared", previous, planned: [] };
   let preserveStaging = false;
@@ -240,14 +240,14 @@ async function activateLocked(environment: Environment, project: Project): Promi
     for (const entry of previous?.managed ?? []) {
       const backupPath = join(backupRoot, entry.path);
       await mkdir(dirname(backupPath), { recursive: true });
-      await rename(resolveManagedPath(project.root, entry.path, entry.skill), backupPath);
+      await rename(await checkedManagedPath(project.root, entry.path, entry.skill), backupPath);
       backedUp.push({ skill: entry.skill, path: entry.path, backupPath });
     }
     for (const entry of staged) {
-      const destination = join(project.root, entry.path);
+      const destination = await checkedManagedPath(project.root, entry.path, entry.skill);
       await mkdir(dirname(destination), { recursive: true });
       await rename(entry.stagedPath, destination);
-      installed.push(entry.path);
+      installed.push({ skill: entry.skill, path: entry.path });
     }
 
     const state: ProjectState = {
@@ -268,11 +268,17 @@ async function activateLocked(environment: Environment, project: Project): Promi
       structuralRecoveryErrors.push(recoveryError);
       recoveryErrors.push(recoveryError);
     };
-    for (const path of [...installed].reverse()) {
-      await rm(join(project.root, path), { recursive: true, force: true }).catch(recordStructuralError);
+    for (const entry of [...installed].reverse()) {
+      await checkedManagedPath(project.root, entry.path, entry.skill)
+        .then((destination) => rm(destination, { recursive: true, force: true }))
+        .catch(recordStructuralError);
     }
     for (const entry of [...backedUp].reverse()) {
-      const destination = resolveManagedPath(project.root, entry.path, entry.skill);
+      const destination = await checkedManagedPath(project.root, entry.path, entry.skill).catch((recoveryError) => {
+        recordStructuralError(recoveryError);
+        return null;
+      });
+      if (!destination) continue;
       await mkdir(dirname(destination), { recursive: true }).catch(recordStructuralError);
       await rename(entry.backupPath, destination).catch(recordStructuralError);
     }

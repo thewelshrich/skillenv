@@ -103,6 +103,19 @@ describe("skillenv", () => {
     expect(await pathExists(join(home, "skills/react/SKILL.md"))).toBe(true);
   });
 
+  it("refuses to materialize through symlinked destination ancestors", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    const outside = join(sandbox, "outside-skills");
+    await mkdir(outside, { recursive: true });
+    await mkdir(join(project, ".agents"), { recursive: true });
+    await symlink(outside, join(project, ".agents/skills"));
+
+    await expect(activate("frontend", project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(await pathExists(join(outside, "react"))).toBe(false);
+    expect(await pathExists(join(project, ".skillenv/state.json"))).toBe(false);
+  });
+
   it("recovers an activation interrupted during backup moves", async () => {
     await addSkill(await makeSkill("react"));
     await addEnvironment("frontend", ["react"]);

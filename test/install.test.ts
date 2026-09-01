@@ -371,6 +371,11 @@ describe("installer", () => {
     await expect(resolveSource(join(parent, "react"))).rejects.toMatchObject({ code: "ENOTDIR" });
   });
 
+  it("does not reinterpret missing explicit relative paths as GitHub shorthand", async () => {
+    await expect(resolveSource(`./missing-${Math.random().toString(16).slice(2)}`))
+      .rejects.toMatchObject({ code: "SOURCE_UNSUPPORTED" });
+  });
+
   it("rejects existing non-directory sources before remote fallback", async () => {
     const source = join(sandbox, "owner/repo");
     await mkdir(join(sandbox, "owner"), { recursive: true });
@@ -393,6 +398,20 @@ describe("installer", () => {
     } finally {
       await resolved.cleanup();
     }
+  });
+
+  it("sanitizes untrusted discovered paths in duplicate-name errors", async () => {
+    const root = join(sandbox, "unsafe-paths");
+    for (const directory of ["first\u001b[31m", "second"]) {
+      await mkdir(join(root, "skills", directory), { recursive: true });
+      await writeFile(join(root, "skills", directory, "SKILL.md"), "---\nname: duplicate\n---\n");
+    }
+
+    const error = await resolveSource(root).catch((caught: unknown) => caught as Error);
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) throw new Error("Expected source discovery to fail");
+    expect(error.message).not.toContain("\u001b");
+    expect(error.message).toContain("first [31m");
   });
 
   it("treats executable mode changes as library conflicts", async () => {
