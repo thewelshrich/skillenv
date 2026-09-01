@@ -139,9 +139,17 @@ export async function install(request: InstallRequest, interaction?: InstallInte
       }
     } catch (error) {
       const recoveryErrors: unknown[] = [];
-      await environmentChange?.rollback().catch((recoveryError) => recoveryErrors.push(recoveryError));
-      await libraryChange?.rollback().catch((recoveryError) => recoveryErrors.push(recoveryError));
-      if (activationAttempted) {
+      let environmentRestored = true;
+      let libraryRestored = true;
+      await environmentChange?.rollback().catch((recoveryError) => {
+        environmentRestored = false;
+        recoveryErrors.push(recoveryError);
+      });
+      await libraryChange?.rollback().catch((recoveryError) => {
+        libraryRestored = false;
+        recoveryErrors.push(recoveryError);
+      });
+      if (activationAttempted && environmentRestored && libraryRestored) {
         const previousEnvironment = status?.state?.environment ?? null;
         await (previousEnvironment ? activate(previousEnvironment, cwd) : deactivate(cwd)).catch((recoveryError) => recoveryErrors.push(recoveryError));
       }

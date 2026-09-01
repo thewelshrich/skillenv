@@ -68,7 +68,7 @@ function frontmatter(content: string): Record<string, unknown> {
 }
 
 function terminalSafeLine(input: string): string {
-  return input.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
+  return input.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim();
 }
 
 async function candidateAt(directory: string, root: string): Promise<SkillCandidate | null> {

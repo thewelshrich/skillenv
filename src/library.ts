@@ -120,10 +120,13 @@ async function acquireLibraryLock(retry = true): Promise<() => Promise<void>> {
 }
 
 async function recoverLibraryTransactions(): Promise<void> {
-  const entries = await readdir(transactionsDir(), { withFileTypes: true }).catch(() => []);
+  const entries = await readdir(transactionsDir(), { withFileTypes: true });
   for (const entry of entries.filter((candidate) => candidate.isDirectory())) {
     const root = join(transactionsDir(), entry.name);
-    const journal = transactionJournal(await readJson(join(root, "journal.json")).catch(() => null));
+    const journalPath = join(root, "journal.json");
+    const journalValue = await pathExists(journalPath) ? await readJson(journalPath) : null;
+    const journal = transactionJournal(journalValue);
+    if (journalValue && !journal) throw new SkillenvError(`Invalid interrupted library transaction: ${journalPath}`, "RECOVERY_REQUIRED");
     const backupSkills = join(root, "backup", "skills");
     const backupMetadata = join(root, "backup", "metadata");
     if (journal?.version === 1 && journal.phase === "prepared") {
@@ -150,14 +153,22 @@ async function recoverLibraryTransactions(): Promise<void> {
         }
       }
     } else if (!journal) {
-      for (const backup of await readdir(backupSkills, { withFileTypes: true }).catch(() => [])) {
+      const skillBackups = await readdir(backupSkills, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      });
+      for (const backup of skillBackups) {
         const destination = join(libraryDir(), backup.name);
         if (!(await pathExists(destination))) {
           await mkdir(libraryDir(), { recursive: true });
           await rename(join(backupSkills, backup.name), destination);
         }
       }
-      for (const backup of await readdir(backupMetadata, { withFileTypes: true }).catch(() => [])) {
+      const metadataBackups = await readdir(backupMetadata, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      });
+      for (const backup of metadataBackups) {
         const destination = join(metadataDir(), backup.name);
         if (!(await pathExists(destination))) {
           await mkdir(metadataDir(), { recursive: true });

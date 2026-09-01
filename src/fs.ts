@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cp, mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { SkillenvError } from "./errors.js";
 
@@ -58,10 +58,10 @@ export async function hashDirectory(root: string, options: { ignoreNames?: Reado
       if (options.ignoreNames?.has(entry.name)) continue;
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
       const absolute = join(directory, entry.name);
-      if (options.includeModes) hash.update(`m:${(await stat(absolute)).mode & 0o777}\0`);
       if (entry.isSymbolicLink()) {
         throw new SkillenvError(`Symbolic links are not supported in skills: ${relative}`);
       }
+      if (options.includeModes) hash.update(`m:${(await lstat(absolute)).mode & 0o777}\0`);
       if (entry.isDirectory()) {
         hash.update(`d:${relative}\0`);
         await visit(absolute, relative);
