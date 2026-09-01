@@ -94,6 +94,20 @@ describe("installer", () => {
       .rejects.toMatchObject({ code: "INPUT_REQUIRED" });
   });
 
+  it("preserves significant whitespace in explicit local source paths", async () => {
+    const trimmed = join(sandbox, "company-skill");
+    const exact = `${trimmed} `;
+    await mkdir(join(trimmed, "skills", "wrong"), { recursive: true });
+    await writeFile(join(trimmed, "skills", "wrong", "SKILL.md"), "---\nname: wrong\n---\n");
+    await mkdir(join(exact, "skills", "right"), { recursive: true });
+    await writeFile(join(exact, "skills", "right", "SKILL.md"), "---\nname: right\n---\n");
+
+    const result = await install({ source: exact, target: { kind: "library" }, dryRun: true, cwd: project });
+
+    expect(result.status).toBe("planned");
+    if (result.status === "planned") expect(result.plan.skills).toEqual(["right"]);
+  });
+
   it("creates an environment and activates it in the current project", async () => {
     const source = await makeCollection([{ name: "react" }, { name: "playwright" }]);
 
@@ -464,6 +478,15 @@ describe("installer", () => {
     } finally {
       await change.finalize();
     }
+  });
+
+  it("preserves modified installed library copies during rollback", async () => {
+    const resolved = await resolveSource(await makeCollection([{ name: "react" }]));
+    const change = await installLibrarySkills(resolved.skills, { input: resolved.input, kind: resolved.kind, revision: null }, { replace: false });
+    await writeFile(join(home, "skills/react/SKILL.md"), "user edit\n");
+
+    await expect(change.rollback()).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toBe("user edit\n");
   });
 
   it("recovers an interrupted library transaction before installing", async () => {

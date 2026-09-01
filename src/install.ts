@@ -67,8 +67,8 @@ export async function install(request: InstallRequest, interaction?: InstallInte
   const cwd = request.cwd ?? process.cwd();
   try {
     interaction?.intro();
-    const sourceInput = (request.source ?? (interaction ? await interaction.source() : requireInput("A source is required"))).trim();
-    if (!sourceInput) requireInput("A source is required");
+    const sourceInput = request.source ?? (interaction ? await interaction.source() : requireInput("A source is required"));
+    if (!sourceInput.trim()) requireInput("A source is required");
     source = interaction
       ? await interaction.task("Resolving source…", () => resolveSource(sourceInput))
       : await resolveSource(sourceInput);

@@ -14,6 +14,17 @@ function statePath(root: string): string {
   return join(root, ".skillenv", "state.json");
 }
 
+async function assertProjectMetadataRoot(root: string): Promise<void> {
+  const metadataRoot = join(root, ".skillenv");
+  const entry = await lstat(metadataRoot).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (entry && (entry.isSymbolicLink() || !entry.isDirectory())) {
+    throw new SkillenvError("Refusing unsafe project metadata root: .skillenv", "RECOVERY_REQUIRED");
+  }
+}
+
 function resolveManagedPath(root: string, path: string, skill: string): string {
   if (!isAdapterSkillPath(path, skill)) {
     throw new SkillenvError(`Refusing unsafe managed path in project state: ${path}`);
@@ -48,6 +59,7 @@ async function checkedManagedPath(root: string, path: string, skill: string): Pr
 }
 
 export async function readProjectState(root: string): Promise<ProjectState | null> {
+  await assertProjectMetadataRoot(root);
   const path = statePath(root);
   if (!(await pathExists(path))) return null;
   try {
@@ -102,6 +114,7 @@ function parseActivationJournal(value: unknown): ActivationJournal | null {
 }
 
 async function acquireProjectLock(root: string): Promise<() => Promise<void>> {
+  await assertProjectMetadataRoot(root);
   const lockRoot = join(root, ".skillenv", "locks");
   await mkdir(lockRoot, { recursive: true });
   const name = `activation-${process.pid}-${Date.now()}-${randomUUID()}`;
@@ -135,6 +148,7 @@ async function acquireProjectLock(root: string): Promise<() => Promise<void>> {
 }
 
 async function recoverActivationTransactions(project: Project): Promise<void> {
+  await assertProjectMetadataRoot(project.root);
   const skillenvRoot = join(project.root, ".skillenv");
   const entries = await readdir(skillenvRoot, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [];
@@ -184,6 +198,7 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
 }
 
 async function hasActivationTransactions(root: string): Promise<boolean> {
+  await assertProjectMetadataRoot(root);
   const entries = await readdir(join(root, ".skillenv"), { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [];
     throw error;
@@ -223,7 +238,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
   const backupRoot = join(stagingRoot, "backup");
   const journalPath = join(stagingRoot, "journal.json");
   const staged: Array<{ skill: string; path: string; stagedPath: string; hash: string }> = [];
-  const installed: Array<{ skill: string; path: string }> = [];
+  const installed: Array<{ skill: string; path: string; hash: string }> = [];
   const backedUp: Array<{ skill: string; path: string; backupPath: string }> = [];
   const journal: ActivationJournal = { version: 1, phase: "prepared", previous, planned: [] };
   let preserveStaging = false;
@@ -247,7 +262,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
       const destination = await checkedManagedPath(project.root, entry.path, entry.skill);
       await mkdir(dirname(destination), { recursive: true });
       await rename(entry.stagedPath, destination);
-      installed.push({ skill: entry.skill, path: entry.path });
+      installed.push({ skill: entry.skill, path: entry.path, hash: entry.hash });
     }
 
     const state: ProjectState = {
@@ -270,7 +285,15 @@ async function activateLocked(environment: Environment, project: Project): Promi
     };
     for (const entry of [...installed].reverse()) {
       await checkedManagedPath(project.root, entry.path, entry.skill)
-        .then((destination) => rm(destination, { recursive: true, force: true }))
+        .then(async (destination) => {
+          if (await pathExists(destination)) {
+            const currentHash = await hashDirectory(destination);
+            if (currentHash !== entry.hash) {
+              throw new SkillenvError(`Installed activation path was modified during rollback: ${entry.path}`, "RECOVERY_REQUIRED");
+            }
+            await rm(destination, { recursive: true, force: true });
+          }
+        })
         .catch(recordStructuralError);
     }
     for (const entry of [...backedUp].reverse()) {

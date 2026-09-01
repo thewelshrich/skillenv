@@ -185,6 +185,40 @@ describe("skillenv", () => {
     expect(await readFile(join(externalSkill, "SKILL.md"), "utf8")).toBe("external\n");
   });
 
+  it("refuses symlinked project metadata roots without deleting external transactions", async () => {
+    const outsideMetadata = join(sandbox, "outside-metadata");
+    const externalTransaction = join(outsideMetadata, "staging-external");
+    await mkdir(externalTransaction, { recursive: true });
+    await writeFile(join(externalTransaction, "keep.txt"), "external\n");
+    await symlink(outsideMetadata, join(project, ".skillenv"));
+
+    await expect(getStatus(project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(await readFile(join(externalTransaction, "keep.txt"), "utf8")).toBe("external\n");
+  });
+
+  it("preserves modified newly installed paths during activation rollback", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    const gitExclude = join(project, ".git/info/exclude");
+    await rm(gitExclude);
+    await mkdir(gitExclude);
+    const destination = join(project, ".agents/skills/react");
+    const editWhenInstalled = (async () => {
+      for (let attempt = 0; attempt < 5000; attempt += 1) {
+        if (await pathExists(destination)) {
+          await writeFile(join(destination, "SKILL.md"), "user edit\n");
+          return;
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      throw new Error("Activation did not materialize the expected path");
+    })();
+
+    await expect(activate("frontend", project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    await editWhenInstalled;
+    expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe("user edit\n");
+  });
+
   it("reads inactive status without creating project state", async () => {
     const status = await getStatus(project);
 

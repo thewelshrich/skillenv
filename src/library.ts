@@ -358,7 +358,17 @@ export async function installLibrarySkills(
       await writeJson(join(transactionRoot, "journal.json"), journal);
       for (const record of [...committed].reverse()) {
         const { name } = record;
-        if (record.skillInstalled) await rm(join(libraryDir(), name), { recursive: true, force: true });
+        if (record.skillInstalled) {
+          const destination = join(libraryDir(), name);
+          if (await entryExists(destination)) {
+            const expectedHash = journal.entries.find((entry) => entry.name === name)?.installedHash;
+            const currentHash = await hashDirectory(destination, { includeModes: true }).catch(() => null);
+            if (!expectedHash || currentHash !== expectedHash) {
+              throw new SkillenvError(`Installed library skill was modified during rollback: ${name}`, "RECOVERY_REQUIRED");
+            }
+            await rm(destination, { recursive: true, force: true });
+          }
+        }
         if (record.metadataInstalled) await rm(join(metadataDir(), `${name}.json`), { force: true });
         if (record.skillBackedUp) {
           await mkdir(libraryDir(), { recursive: true });
