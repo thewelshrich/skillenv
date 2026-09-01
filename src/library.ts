@@ -59,6 +59,7 @@ export interface PreparedSkill {
   description: string;
   directory: string;
   sourcePath: string;
+  discoveryHash?: string;
 }
 
 export interface LibraryInspection {
@@ -113,8 +114,6 @@ function transactionJournal(value: unknown): TransactionJournal | null {
 }
 
 const locksDir = () => join(transactionsDir(), "locks");
-const LOCK_STALE_MS = 30 * 60 * 1000;
-
 function processIsRunning(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -135,8 +134,7 @@ async function acquireLibraryLock(): Promise<() => Promise<void>> {
     for (const contender of contenders.filter((entry) => entry.isDirectory() && entry.name !== lockName)) {
       const match = /^install-(\d+)-(\d+)-/.exec(contender.name);
       const pid = Number(match?.[1]);
-      const createdAt = Number(match?.[2]);
-      if (Number.isInteger(pid) && pid > 0 && processIsRunning(pid) && Number.isFinite(createdAt) && Date.now() - createdAt < LOCK_STALE_MS) activeContender = true;
+      if (Number.isInteger(pid) && pid > 0 && processIsRunning(pid)) activeContender = true;
       else await rm(join(locksDir(), contender.name), { recursive: true, force: true });
     }
     if (activeContender) throw new SkillenvError("Another skill installation is already updating the library", "LIBRARY_BUSY");
@@ -278,6 +276,7 @@ export async function inspectLibrary(skills: readonly PreparedSkill[]): Promise<
     if (alias && alias !== skill.name) throw new SkillenvError(`Library skill names '${alias}' and '${skill.name}' collide on case-insensitive filesystems`, "DUPLICATE_SKILL");
     const destination = join(libraryDir(), skill.name);
     const candidateHash = await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]), includeModes: true });
+    if (skill.discoveryHash && candidateHash !== skill.discoveryHash) throw new SkillenvError(`Skill source changed after discovery: ${skill.name}`, "SOURCE_CHANGED");
     fingerprints[skill.name] = candidateHash;
     const metadataPath = join(metadataDir(), `${skill.name}.json`);
     const metadataExists = await entryExists(metadataPath);
@@ -311,12 +310,24 @@ export interface LibraryChange {
 export async function installLibrarySkills(
   skills: readonly PreparedSkill[],
   source: { input: string; kind: "local" | "git"; revision: string | null },
-  options: { replace: boolean; allowedConflicts?: readonly string[] },
+  options: {
+    replace: boolean;
+    allowedConflicts?: readonly string[];
+    approvedState?: Readonly<Record<string, { skill: string | null; metadata: string | null }>>;
+  },
 ): Promise<LibraryChange> {
   const releaseLock = await acquireLibraryLock();
   try {
     await recoverLibraryTransactions();
     const inspection = await inspectLibrary(skills);
+    if (options.approvedState) {
+      for (const [name, approved] of Object.entries(options.approvedState)) {
+        const current = { skill: inspection.existingFingerprints[name] ?? null, metadata: inspection.metadataFingerprints[name] ?? null };
+        if (current.skill !== approved.skill || current.metadata !== approved.metadata) {
+          throw new SkillenvError(`Library changed after replacement approval: ${name}`, "LIBRARY_CONFLICT_CHANGED");
+        }
+      }
+    }
     if (inspection.conflicts.length && !options.replace) {
       throw new SkillenvError(`Library conflicts: ${inspection.conflicts.join(", ")}`, "LIBRARY_CONFLICT");
     }
@@ -334,11 +345,8 @@ export async function installLibrarySkills(
   const unchanged = new Set(inspection.unchanged);
   const installed = skills.filter((skill) => !unchanged.has(skill.name)).map((skill) => skill.name);
   const replaced = inspection.conflicts;
-  const metadataOnly = new Set<string>();
-  for (const skill of skills.filter((candidate) => unchanged.has(candidate.name))) {
-    if (!(await entryExists(join(metadataDir(), `${skill.name}.json`)))) metadataOnly.add(skill.name);
-  }
-    const metadataNames = new Set([...installed, ...metadataOnly]);
+  const metadataOnly = new Set(skills.filter((candidate) => unchanged.has(candidate.name)).map((skill) => skill.name));
+    const metadataNames = new Set(skills.map((skill) => skill.name));
     const journal: TransactionJournal = {
       version: 1,
       phase: "prepared",
@@ -352,9 +360,6 @@ export async function installLibrarySkills(
     for (const entry of journal.entries) {
       if (!entry.metadataOnly && !inspection.conflicts.includes(entry.name) && (entry.hadSkill || entry.hadMetadata)) {
         throw new SkillenvError(`Library conflict appeared while installing: ${entry.name}`, "LIBRARY_CONFLICT");
-      }
-      if (entry.metadataOnly && entry.hadMetadata) {
-        throw new SkillenvError(`Library metadata appeared while installing: ${entry.name}`, "LIBRARY_CONFLICT");
       }
     }
 

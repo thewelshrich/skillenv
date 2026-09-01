@@ -5,7 +5,7 @@ import { basename, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { parse } from "yaml";
 import { SkillenvError } from "./errors.js";
-import { pathExists } from "./fs.js";
+import { hashDirectory, pathExists } from "./fs.js";
 import { nameSchema } from "./schema.js";
 
 const execFileAsync = promisify(execFile);
@@ -33,6 +33,7 @@ export interface SkillCandidate {
   description: string;
   directory: string;
   sourcePath: string;
+  discoveryHash: string;
 }
 
 export interface ResolvedSource {
@@ -83,11 +84,13 @@ async function candidateAt(directory: string, root: string, fallbackName = basen
   try {
     const metadata = frontmatter(await readFile(skillFile, "utf8"));
     const name = nameSchema.parse(typeof metadata.name === "string" ? metadata.name : fallbackName);
+    const discoveryHash = await hashDirectory(directory, { ignoreNames: new Set([".git"]), includeModes: true });
     return {
       name,
       description: typeof metadata.description === "string" ? terminalSafeLine(metadata.description) : "No description provided",
       directory,
       sourcePath,
+      discoveryHash,
     };
   } catch (error) {
     if (error instanceof SkillenvError) throw error;

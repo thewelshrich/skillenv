@@ -133,7 +133,15 @@ export async function install(request: InstallRequest, interaction?: InstallInte
     let environmentChange: EnvironmentChange | null = null;
     let transactionFinalized = false;
     try {
-      libraryChange = await installLibrarySkills(selected, { input: source.input, kind: source.kind, revision: source.revision }, { replace, allowedConflicts });
+      const approvedState = Object.fromEntries(selected.map((skill) => [skill.name, {
+        skill: inspection.existingFingerprints[skill.name] ?? null,
+        metadata: inspection.metadataFingerprints[skill.name] ?? null,
+      }]));
+      libraryChange = await installLibrarySkills(
+        selected,
+        { input: source.input, kind: source.kind, revision: source.revision },
+        { replace, allowedConflicts, approvedState },
+      );
       if (target.kind === "environment") {
         environmentChange = await putEnvironmentSkills(target, selected.map((skill) => skill.name), {
           beforeWrite: (previous, next) => libraryChange!.recordEnvironment(previous, next),
@@ -143,7 +151,7 @@ export async function install(request: InstallRequest, interaction?: InstallInte
         await libraryChange.finalize({ keepLock: true });
         transactionFinalized = true;
         try {
-          await activate(target.name, cwd, { libraryLockHeld: true });
+          await activate(target.name, cwd, { libraryLockHeld: true, expectedEnvironment: environmentChange!.environment });
         } finally {
           await libraryChange.release();
         }

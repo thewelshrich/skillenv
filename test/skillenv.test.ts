@@ -327,6 +327,28 @@ describe("skillenv", () => {
     expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe("unmanaged\n");
   });
 
+  it("rejects library edits made while activation copies are staged", async () => {
+    const source = await makeSkill("react");
+    for (let index = 0; index < 100; index += 1) await writeFile(join(source, `file-${index}.txt`), `${index}\n`);
+    await addSkill(source);
+    await addEnvironment("frontend", ["react"]);
+    const editDuringCopy = (async () => {
+      for (let attempt = 0; attempt < 100000; attempt += 1) {
+        const entries = await readdir(join(project, ".skillenv"), { withFileTypes: true }).catch(() => []);
+        if (entries.some((entry) => entry.isDirectory() && entry.name.startsWith("staging-"))) {
+          await writeFile(join(home, "skills/react/file-50.txt"), "late edit\n");
+          return "changed";
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      return "missing-staging";
+    })();
+
+    await expect(activate("frontend", project)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
+    expect(await editDuringCopy).toBe("changed");
+    expect(await pathExists(join(project, ".agents/skills/react"))).toBe(false);
+  });
+
   it("deactivates cleanly and preserves non-Skillenv ignore rules", async () => {
     await writeFile(join(project, ".git/info/exclude"), "*.local\n");
     await addSkill(await makeSkill("react"));

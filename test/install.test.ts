@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { install, installPlanLines } from "../src/install.js";
-import { addEnvironmentSkill, createEnvironment, putEnvironmentSkills } from "../src/environments.js";
+import { addEnvironmentSkill, createEnvironment, putEnvironmentSkills, removeEnvironmentSkill } from "../src/environments.js";
 import { fingerprintEntry, hashDirectory, pathExists } from "../src/fs.js";
 import { installLibrarySkills } from "../src/library.js";
 import type { InstallInteraction, TargetDecision } from "../src/prompts.js";
@@ -16,11 +16,14 @@ const execFileAsync = promisify(execFile);
 
 class ScriptedInteraction implements InstallInteraction {
   previewed = false;
-  constructor(private readonly answers: { skills?: string[]; target?: TargetDecision; replace?: boolean; confirm?: boolean; onConfirm?: () => Promise<void> } = {}) {}
+  constructor(private readonly answers: { skills?: string[]; target?: TargetDecision; replace?: boolean; confirm?: boolean; onSkills?: () => Promise<void>; onConfirm?: () => Promise<void> } = {}) {}
   intro(): void {}
   async source(): Promise<string> { throw new Error("Unexpected source prompt"); }
   async task<T>(_message: string, operation: () => Promise<T>): Promise<T> { return operation(); }
-  async skills(candidates: readonly SkillCandidate[]): Promise<string[]> { return this.answers.skills ?? candidates.map((candidate) => candidate.name); }
+  async skills(candidates: readonly SkillCandidate[]): Promise<string[]> {
+    await this.answers.onSkills?.();
+    return this.answers.skills ?? candidates.map((candidate) => candidate.name);
+  }
   async replace(): Promise<boolean> { return this.answers.replace ?? false; }
   async target(_environments: readonly Environment[]): Promise<TargetDecision> { return this.answers.target ?? { kind: "library" }; }
   async environmentName(): Promise<string> { return "frontend"; }
@@ -231,6 +234,30 @@ describe("installer", () => {
     await expect(install({ source, selection: { kind: "all" }, cwd: project }, interaction))
       .rejects.toMatchObject({ code: "LIBRARY_CONFLICT_CHANGED" });
     expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toContain("old");
+  });
+
+  it("binds replacement approval to the inspected library contents", async () => {
+    await install({ source: await makeCollection([{ name: "react", body: "old" }]), target: { kind: "library" }, yes: true, cwd: project });
+    const source = await makeCollection([{ name: "react", body: "replacement" }]);
+    const interaction = new ScriptedInteraction({
+      target: { kind: "library" },
+      replace: true,
+      onConfirm: async () => writeFile(join(home, "skills/react/SKILL.md"), "late user edit\n"),
+    });
+
+    await expect(install({ source, cwd: project }, interaction)).rejects.toMatchObject({ code: "LIBRARY_CONFLICT_CHANGED" });
+    expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toBe("late user edit\n");
+  });
+
+  it("rejects source changes made after interactive discovery", async () => {
+    const source = await makeCollection([{ name: "react" }, { name: "playwright" }]);
+    const interaction = new ScriptedInteraction({
+      skills: ["react"],
+      target: { kind: "library" },
+      onSkills: async () => writeFile(join(source, "skills/react/SKILL.md"), "---\nname: renamed\n---\n"),
+    });
+
+    await expect(install({ source, dryRun: true, cwd: project }, interaction)).rejects.toMatchObject({ code: "SOURCE_CHANGED" });
   });
 
   it("supports dry runs without creating the Skillenv home", async () => {
@@ -630,6 +657,47 @@ describe("installer", () => {
     await competitor.cleanup();
   });
 
+  it("verifies the targeted environment snapshot before activation", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    const changeEnvironment = (async () => {
+      for (let attempt = 0; attempt < 100000; attempt += 1) {
+        const path = join(home, "environments/frontend.json");
+        if (await pathExists(path)) {
+          const environment = JSON.parse(await readFile(path, "utf8"));
+          if (environment.skills.includes("react")) {
+            await removeEnvironmentSkill("frontend", "react");
+            return "changed";
+          }
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      return "missing-environment";
+    })();
+
+    await expect(install({
+      source,
+      target: { kind: "environment", name: "frontend", create: true },
+      activate: true,
+      yes: true,
+      cwd: project,
+    })).rejects.toMatchObject({ code: "ENVIRONMENT_CHANGED" });
+    expect(await changeEnvironment).toBe("changed");
+    expect(await pathExists(join(project, ".agents/skills/react"))).toBe(false);
+  });
+
+  it("refreshes provenance for unchanged skill contents", async () => {
+    const first = await makeCollection([{ name: "react", body: "same" }]);
+    const second = await makeCollection([{ name: "react", body: "same" }]);
+    await install({ source: first, target: { kind: "library" }, yes: true, cwd: project });
+
+    const result = await install({ source: second, target: { kind: "library" }, yes: true, cwd: project });
+    const metadata = JSON.parse(await readFile(join(home, "metadata/react.json"), "utf8"));
+
+    expect(result.status).toBe("installed");
+    if (result.status === "installed") expect(result.unchanged).toEqual(["react"]);
+    expect(metadata.source).toBe(second);
+  });
+
   it("recovers an interrupted library transaction before installing", async () => {
     const interrupted = join(home, "transactions/interrupted");
     await mkdir(join(home, "skills/react"), { recursive: true });
@@ -703,8 +771,18 @@ describe("installer", () => {
     expect(await readFile(visibleMetadata, "utf8")).toBe("user edit\n");
   });
 
-  it("reclaims an aged lock even when its PID was reused", async () => {
-    const stale = join(home, `transactions/locks/install-${process.pid}-${Date.now() - 31 * 60 * 1000}-stale`);
+  it("keeps aged locks owned by a live process", async () => {
+    const live = join(home, `transactions/locks/install-${process.pid}-${Date.now() - 31 * 60 * 1000}-live`);
+    await mkdir(live, { recursive: true });
+    const source = await makeCollection([{ name: "react" }]);
+
+    await expect(install({ source, target: { kind: "library" }, yes: true, cwd: project }))
+      .rejects.toMatchObject({ code: "LIBRARY_BUSY" });
+    expect(await pathExists(live)).toBe(true);
+  });
+
+  it("reclaims locks owned by a dead process", async () => {
+    const stale = join(home, `transactions/locks/install-2147483647-${Date.now()}-stale`);
     await mkdir(stale, { recursive: true });
     const source = await makeCollection([{ name: "react" }]);
 

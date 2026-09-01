@@ -3,7 +3,7 @@ import { lstat, mkdir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { ZodError } from "zod";
 import { adapters, adapterSkillPath, isAdapterSkillPath } from "./adapters.js";
-import { readEnvironment } from "./environments.js";
+import { readEnvironment, withEnvironmentLock } from "./environments.js";
 import { SkillenvError } from "./errors.js";
 import { copyDirectory, hashDirectory, pathExists, readJson, removeEmptyParents, writeJson } from "./fs.js";
 import { findProject, updateGitExclude, type Project } from "./git.js";
@@ -134,9 +134,8 @@ async function acquireProjectLock(root: string): Promise<() => Promise<void>> {
     for (const contender of contenders.filter((entry) => entry.isDirectory() && entry.name !== name)) {
       const match = /^activation-(\d+)-(\d+)-/.exec(contender.name);
       const pid = Number(match?.[1]);
-      const createdAt = Number(match?.[2]);
       try {
-        if (Number.isInteger(pid) && pid > 0 && Number.isFinite(createdAt) && Date.now() - createdAt < 30 * 60 * 1000) process.kill(pid, 0);
+        if (Number.isInteger(pid) && pid > 0) process.kill(pid, 0);
         else throw Object.assign(new Error(), { code: "ESRCH" });
         active = true;
       } catch (error) {
@@ -215,9 +214,16 @@ async function hasActivationTransactions(root: string): Promise<boolean> {
   return entries.some((entry) => entry.isDirectory() && entry.name.startsWith("staging-"));
 }
 
-export async function activate(environmentName: string, cwd = process.cwd(), options: { libraryLockHeld?: boolean } = {}): Promise<ActivationResult> {
-  const operation = async () => {
+export async function activate(
+  environmentName: string,
+  cwd = process.cwd(),
+  options: { libraryLockHeld?: boolean; expectedEnvironment?: Environment } = {},
+): Promise<ActivationResult> {
+  const operation = () => withEnvironmentLock(async () => {
     const environment = await readEnvironment(environmentName);
+    if (options.expectedEnvironment && JSON.stringify(environment) !== JSON.stringify(options.expectedEnvironment)) {
+      throw new SkillenvError(`Environment '${environmentName}' changed before activation`, "ENVIRONMENT_CHANGED");
+    }
     const project = await findProject(cwd);
     const releaseLock = await acquireProjectLock(project.root);
     try {
@@ -226,7 +232,7 @@ export async function activate(environmentName: string, cwd = process.cwd(), opt
     } finally {
       await releaseLock();
     }
-  };
+  });
   return options.libraryLockHeld ? operation() : withLibraryReadLock(operation);
 }
 
@@ -257,9 +263,15 @@ async function activateLocked(environment: Environment, project: Project): Promi
   try {
     for (const entry of planned) {
       const source = await requireSkill(entry.skill);
+      const sourceHash = await hashDirectory(source, { includeModes: true });
       const stagedPath = join(stagingRoot, "next", entry.path);
       await copyDirectory(source, stagedPath);
-      staged.push({ ...entry, stagedPath, hash: await hashDirectory(stagedPath, { includeModes: true }) });
+      const stagedHash = await hashDirectory(stagedPath, { includeModes: true });
+      const currentSourceHash = await hashDirectory(source, { includeModes: true });
+      if (sourceHash !== currentSourceHash || stagedHash !== sourceHash) {
+        throw new SkillenvError(`Library skill changed while activating: ${entry.skill}`, "SOURCE_CHANGED");
+      }
+      staged.push({ ...entry, stagedPath, hash: stagedHash });
     }
     journal.planned = staged.map(({ skill, path, hash }) => ({ skill, path, hash }));
     await writeJson(journalPath, journal);
