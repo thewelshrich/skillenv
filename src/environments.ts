@@ -3,7 +3,7 @@ import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { SkillenvError } from "./errors.js";
 import { pathExists, readJson, writeJson } from "./fs.js";
-import { requireSkill } from "./library.js";
+import { requireSkill, withLibraryReadLock } from "./library.js";
 import { environmentsDir, skillenvHome } from "./paths.js";
 import { environmentSchema, nameSchema, type Environment } from "./schema.js";
 
@@ -80,16 +80,18 @@ export async function readEnvironment(nameInput: string): Promise<Environment> {
 
 export async function addEnvironmentSkill(environmentName: string, skillNameInput: string): Promise<Environment> {
   const skillName = nameSchema.parse(skillNameInput);
-  await requireSkill(skillName);
-  return withEnvironmentLock(async () => {
-    const environment = await readEnvironment(environmentName);
-    if (!environment.skills.includes(skillName)) {
-      environment.skills.push(skillName);
-      assertNoCaseCollisions(environment.skills);
-      environment.skills.sort();
-      await writeJson(environmentPath(environment.name), environment);
-    }
-    return environment;
+  return withLibraryReadLock(async () => {
+    await requireSkill(skillName);
+    return withEnvironmentLock(async () => {
+      const environment = await readEnvironment(environmentName);
+      if (!environment.skills.includes(skillName)) {
+        environment.skills.push(skillName);
+        assertNoCaseCollisions(environment.skills);
+        environment.skills.sort();
+        await writeJson(environmentPath(environment.name), environment);
+      }
+      return environment;
+    });
   });
 }
 

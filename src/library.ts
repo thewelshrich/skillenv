@@ -21,15 +21,22 @@ export async function addSkill(sourceInput: string, options: { name?: string; fo
   const sourceStat = await stat(source).catch(() => null);
   if (!sourceStat?.isDirectory()) throw new SkillenvError(`Skill source is not a directory: ${sourceInput}`);
   if (!(await pathExists(join(source, "SKILL.md")))) throw new SkillenvError(`No SKILL.md found in ${sourceInput}`);
-
-  const destination = join(libraryDir(), name);
-  if (await pathExists(destination)) {
-    if (!options.force) throw new SkillenvError(`Skill '${name}' already exists (use --force to replace it)`);
-    await rm(destination, { recursive: true });
-  }
-  await mkdir(libraryDir(), { recursive: true });
-  await cp(source, destination, { recursive: true, errorOnExist: true, force: false });
-  return name;
+  return withLibraryReadLock(async () => {
+    const existingNames = await readdir(libraryDir()).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    const alias = existingNames.find((existing) => existing.toLocaleLowerCase("en-US") === name.toLocaleLowerCase("en-US") && existing !== name);
+    if (alias) throw new SkillenvError(`Library skill names '${alias}' and '${name}' collide on case-insensitive filesystems`, "DUPLICATE_SKILL");
+    const destination = join(libraryDir(), name);
+    if (await entryExists(destination)) {
+      if (!options.force) throw new SkillenvError(`Skill '${name}' already exists (use --force to replace it)`);
+      await rm(destination, { recursive: true });
+    }
+    await mkdir(libraryDir(), { recursive: true });
+    await cp(source, destination, { recursive: true, errorOnExist: true, force: false });
+    return name;
+  });
 }
 
 export async function listSkills(): Promise<string[]> {
@@ -68,6 +75,7 @@ interface TransactionEntry {
   hadSkill: boolean;
   hadMetadata: boolean;
   installedHash?: string;
+  installedMetadataFingerprint?: string;
 }
 
 interface TransactionJournal {
@@ -89,7 +97,8 @@ function transactionJournal(value: unknown): TransactionJournal | null {
     if (!parsedName.success || typeof item.metadataOnly !== "boolean" || typeof item.hadSkill !== "boolean" || typeof item.hadMetadata !== "boolean") return null;
     if (!item.metadataOnly && (typeof item.installedHash !== "string" || !/^[a-f0-9]{64}$/.test(item.installedHash))) return null;
     if (item.metadataOnly && item.installedHash !== undefined && (typeof item.installedHash !== "string" || !/^[a-f0-9]{64}$/.test(item.installedHash))) return null;
-    entries.push({ name: parsedName.data, metadataOnly: item.metadataOnly, hadSkill: item.hadSkill, hadMetadata: item.hadMetadata, ...(item.installedHash ? { installedHash: item.installedHash } : {}) });
+    if (item.installedMetadataFingerprint !== undefined && (typeof item.installedMetadataFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(item.installedMetadataFingerprint))) return null;
+    entries.push({ name: parsedName.data, metadataOnly: item.metadataOnly, hadSkill: item.hadSkill, hadMetadata: item.hadMetadata, ...(item.installedHash ? { installedHash: item.installedHash } : {}), ...(item.installedMetadataFingerprint ? { installedMetadataFingerprint: item.installedMetadataFingerprint } : {}) });
   }
   let environment: TransactionJournal["environment"];
   if (candidate.environment !== undefined) {
@@ -143,6 +152,16 @@ async function acquireLibraryLock(): Promise<() => Promise<void>> {
   };
 }
 
+export async function withLibraryReadLock<T>(operation: () => Promise<T>): Promise<T> {
+  const releaseLock = await acquireLibraryLock();
+  try {
+    await recoverLibraryTransactions();
+    return await operation();
+  } finally {
+    await releaseLock();
+  }
+}
+
 async function recoverLibraryTransactions(): Promise<void> {
   const entries = await readdir(transactionsDir(), { withFileTypes: true });
   for (const entry of entries.filter((candidate) => candidate.isDirectory() && candidate.name !== "locks")) {
@@ -187,7 +206,14 @@ async function recoverLibraryTransactions(): Promise<void> {
             await rm(destination, { recursive: true, force: true });
           }
         }
-        if (await pathExists(metadataBackup)) {
+        const metadataBackupExists = await entryExists(metadataBackup);
+        if (await entryExists(metadataDestination) && (metadataBackupExists || !item.hadMetadata)) {
+          const currentFingerprint = await fingerprintEntry(metadataDestination);
+          if (!item.installedMetadataFingerprint || currentFingerprint !== item.installedMetadataFingerprint) {
+            throw new SkillenvError(`Interrupted library metadata was modified: ${item.name}`, "RECOVERY_REQUIRED");
+          }
+        }
+        if (metadataBackupExists) {
           await rm(metadataDestination, { force: true });
           await mkdir(metadataDir(), { recursive: true });
           await rename(metadataBackup, metadataDestination);
@@ -229,7 +255,15 @@ export async function inspectLibrary(skills: readonly PreparedSkill[]): Promise<
   const fingerprints: Record<string, string> = {};
   const existingFingerprints: Record<string, string> = {};
   const metadataFingerprints: Record<string, string> = {};
-  const existingNames = await listSkills();
+  const libraryNames = await readdir(libraryDir()).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const metadataNames = (await readdir(metadataDir()).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  })).filter((name) => name.endsWith(".json")).map((name) => name.slice(0, -5));
+  const existingNames = [...new Set([...libraryNames, ...metadataNames])];
   const existingByCase = new Map(existingNames.map((name) => [name.toLocaleLowerCase("en-US"), name]));
   for (const skill of skills) {
     const alias = existingByCase.get(skill.name.toLocaleLowerCase("en-US"));
@@ -337,7 +371,9 @@ export async function installLibrarySkills(
         hash: await hashDirectory(metadataOnly.has(skill.name) ? skill.directory : stagedSkill, metadataOnly.has(skill.name) ? { ignoreNames: new Set([".git"]) } : undefined),
         installedAt: new Date().toISOString(),
       };
-      await writeJson(join(stagedMetadata, `${skill.name}.json`), metadata);
+      const stagedMetadataPath = join(stagedMetadata, `${skill.name}.json`);
+      await writeJson(stagedMetadataPath, metadata);
+      journal.entries.find((entry) => entry.name === skill.name)!.installedMetadataFingerprint = await fingerprintEntry(stagedMetadataPath);
     }
     for (const skill of skills.filter((candidate) => unchanged.has(candidate.name))) {
       const current = await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]), includeModes: true });
@@ -377,7 +413,17 @@ export async function installLibrarySkills(
             await rm(destination, { recursive: true, force: true });
           }
         }
-        if (record.metadataInstalled) await rm(join(metadataDir(), `${name}.json`), { force: true });
+        if (record.metadataInstalled) {
+          const metadataDestination = join(metadataDir(), `${name}.json`);
+          if (await entryExists(metadataDestination)) {
+            const expectedFingerprint = journal.entries.find((entry) => entry.name === name)?.installedMetadataFingerprint;
+            const currentFingerprint = await fingerprintEntry(metadataDestination);
+            if (!expectedFingerprint || currentFingerprint !== expectedFingerprint) {
+              throw new SkillenvError(`Installed library metadata was modified during rollback: ${name}`, "RECOVERY_REQUIRED");
+            }
+            await rm(metadataDestination, { force: true });
+          }
+        }
         if (record.skillBackedUp) {
           await mkdir(libraryDir(), { recursive: true });
           await rename(join(backupSkills, name), join(libraryDir(), name));

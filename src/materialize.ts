@@ -7,7 +7,7 @@ import { readEnvironment } from "./environments.js";
 import { SkillenvError } from "./errors.js";
 import { copyDirectory, hashDirectory, pathExists, readJson, removeEmptyParents, writeJson } from "./fs.js";
 import { findProject, updateGitExclude, type Project } from "./git.js";
-import { requireSkill } from "./library.js";
+import { requireSkill, withLibraryReadLock } from "./library.js";
 import { nameSchema, projectStateSchema, type Environment, type ProjectState } from "./schema.js";
 
 function statePath(root: string): string {
@@ -207,15 +207,17 @@ async function hasActivationTransactions(root: string): Promise<boolean> {
 }
 
 export async function activate(environmentName: string, cwd = process.cwd()): Promise<ActivationResult> {
-  const environment = await readEnvironment(environmentName);
-  const project = await findProject(cwd);
-  const releaseLock = await acquireProjectLock(project.root);
-  try {
-    await recoverActivationTransactions(project);
-    return await activateLocked(environment, project);
-  } finally {
-    await releaseLock();
-  }
+  return withLibraryReadLock(async () => {
+    const environment = await readEnvironment(environmentName);
+    const project = await findProject(cwd);
+    const releaseLock = await acquireProjectLock(project.root);
+    try {
+      await recoverActivationTransactions(project);
+      return await activateLocked(environment, project);
+    } finally {
+      await releaseLock();
+    }
+  });
 }
 
 async function activateLocked(environment: Environment, project: Project): Promise<ActivationResult> {

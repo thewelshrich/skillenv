@@ -47,7 +47,9 @@ export interface ResolvedSource {
 function splitRef(input: string): { source: string; ref?: string } {
   const index = input.lastIndexOf("#");
   if (index <= input.indexOf("://") + 2) return { source: input };
-  return { source: input.slice(0, index), ref: input.slice(index + 1) || undefined };
+  const ref = input.slice(index + 1);
+  if (!ref) throw new SkillenvError("Git source ref cannot be empty", "INVALID_INPUT");
+  return { source: input.slice(0, index), ref };
 }
 
 function gitUrl(input: string): { url: string; ref?: string } | null {

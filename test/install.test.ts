@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { install, installPlanLines } from "../src/install.js";
-import { putEnvironmentSkills } from "../src/environments.js";
-import { pathExists } from "../src/fs.js";
+import { addEnvironmentSkill, createEnvironment, putEnvironmentSkills } from "../src/environments.js";
+import { fingerprintEntry, hashDirectory, pathExists } from "../src/fs.js";
 import { installLibrarySkills } from "../src/library.js";
 import type { InstallInteraction, TargetDecision } from "../src/prompts.js";
 import type { Environment } from "../src/schema.js";
@@ -92,6 +92,10 @@ describe("installer", () => {
   it("rejects empty source input", async () => {
     await expect(install({ source: "   ", target: { kind: "library" }, dryRun: true, cwd: project }))
       .rejects.toMatchObject({ code: "INPUT_REQUIRED" });
+  });
+
+  it("rejects explicitly empty Git refs", async () => {
+    await expect(resolveSource("owner/repo#")).rejects.toMatchObject({ code: "INVALID_INPUT" });
   });
 
   it("preserves significant whitespace in explicit local source paths", async () => {
@@ -460,6 +464,17 @@ describe("installer", () => {
       .rejects.toMatchObject({ code: "DUPLICATE_SKILL" });
   });
 
+  it("rejects case aliases of legacy non-directory library entries", async () => {
+    const outside = join(sandbox, "legacy-react");
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "SKILL.md"), "legacy\n");
+    await mkdir(join(home, "skills"), { recursive: true });
+    await symlink(outside, join(home, "skills/react"));
+
+    await expect(install({ source: await makeCollection([{ name: "React" }]), target: { kind: "library" }, dryRun: true, cwd: project }))
+      .rejects.toMatchObject({ code: "DUPLICATE_SKILL" });
+  });
+
   it("rejects special filesystem entries during dry-run validation", async () => {
     const source = await makeCollection([{ name: "react" }]);
     await execFileAsync("mkfifo", [join(source, "skills/react/pipe")]);
@@ -553,6 +568,35 @@ describe("installer", () => {
     await expect(install({ source, target: { kind: "library" }, yes: true, cwd: project }))
       .rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toBe("user edit\n");
+  });
+
+  it("preserves edited metadata from an interrupted library install", async () => {
+    const interrupted = join(home, "transactions/interrupted");
+    const visibleSkill = join(home, "skills/react");
+    const visibleMetadata = join(home, "metadata/react.json");
+    await mkdir(visibleSkill, { recursive: true });
+    await writeFile(join(visibleSkill, "SKILL.md"), "installed\n");
+    await mkdir(join(home, "metadata"), { recursive: true });
+    await writeFile(visibleMetadata, "{\"name\":\"react\"}\n");
+    const installedMetadataFingerprint = await fingerprintEntry(visibleMetadata);
+    await writeFile(visibleMetadata, "user edit\n");
+    await mkdir(interrupted, { recursive: true });
+    await writeFile(join(interrupted, "journal.json"), `${JSON.stringify({
+      version: 1,
+      phase: "prepared",
+      entries: [{
+        name: "react",
+        metadataOnly: false,
+        hadSkill: false,
+        hadMetadata: false,
+        installedHash: await hashDirectory(visibleSkill, { includeModes: true }),
+        installedMetadataFingerprint,
+      }],
+    })}\n`);
+
+    await expect(install({ source: await makeCollection([{ name: "playwright" }]), target: { kind: "library" }, yes: true, cwd: project }))
+      .rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(await readFile(visibleMetadata, "utf8")).toBe("user edit\n");
   });
 
   it("reclaims an aged lock even when its PID was reused", async () => {
@@ -656,5 +700,17 @@ describe("installer", () => {
       .rejects.toMatchObject({ code: "ENVIRONMENT_BUSY" });
     release();
     await first;
+  });
+
+  it("keeps environment readers from observing prepared library changes", async () => {
+    await createEnvironment("frontend");
+    const resolved = await resolveSource(await makeCollection([{ name: "react" }]));
+    const change = await installLibrarySkills(resolved.skills, { input: resolved.input, kind: resolved.kind, revision: null }, { replace: false });
+    try {
+      await expect(addEnvironmentSkill("frontend", "react")).rejects.toMatchObject({ code: "LIBRARY_BUSY" });
+    } finally {
+      await change.rollback();
+      await resolved.cleanup();
+    }
   });
 });
