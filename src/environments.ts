@@ -20,18 +20,22 @@ function processIsRunning(pid: number): boolean {
   }
 }
 
-async function withEnvironmentLock<T>(operation: () => Promise<T>): Promise<T> {
+const LOCK_STALE_MS = 30 * 60 * 1000;
+
+export async function withEnvironmentLock<T>(operation: () => Promise<T>): Promise<T> {
   const lockRoot = join(skillenvHome(), "environment-locks");
   await mkdir(lockRoot, { recursive: true });
-  const name = `environment-${process.pid}-${randomUUID()}`;
+  const name = `environment-${process.pid}-${Date.now()}-${randomUUID()}`;
   const owned = join(lockRoot, name);
   await mkdir(owned);
   try {
     const contenders = await readdir(lockRoot, { withFileTypes: true });
     let active = false;
     for (const contender of contenders.filter((entry) => entry.isDirectory() && entry.name !== name)) {
-      const pid = Number(/^environment-(\d+)-/.exec(contender.name)?.[1]);
-      if (Number.isInteger(pid) && pid > 0 && processIsRunning(pid)) active = true;
+      const match = /^environment-(\d+)-(\d+)-/.exec(contender.name);
+      const pid = Number(match?.[1]);
+      const createdAt = Number(match?.[2]);
+      if (Number.isInteger(pid) && pid > 0 && processIsRunning(pid) && Number.isFinite(createdAt) && Date.now() - createdAt < LOCK_STALE_MS) active = true;
       else await rm(join(lockRoot, contender.name), { recursive: true, force: true });
     }
     if (active) throw new SkillenvError("Another Skillenv operation is updating environments", "ENVIRONMENT_BUSY");

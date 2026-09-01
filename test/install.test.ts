@@ -383,7 +383,7 @@ describe("installer", () => {
     await writeFile(join(interrupted, "journal.json"), `${JSON.stringify({
       version: 1,
       phase: "prepared",
-      entries: [{ name: "react", metadataOnly: false, hadSkill: true, hadMetadata: false }],
+      entries: [{ name: "react", metadataOnly: false, hadSkill: true, hadMetadata: false, installedHash: "a".repeat(64) }],
       environment: { name: "frontend", previous: previousEnvironment, next: nextEnvironment },
     })}\n`);
     const source = await makeCollection([{ name: "playwright" }]);
@@ -394,6 +394,35 @@ describe("installer", () => {
     expect(JSON.parse(await readFile(join(home, "environments/frontend.json"), "utf8"))).toEqual(previousEnvironment);
     expect(await pathExists(join(home, "skills/playwright/SKILL.md"))).toBe(true);
     expect(await pathExists(interrupted)).toBe(false);
+  });
+
+  it("preserves edits to a skill from an interrupted library install", async () => {
+    const interrupted = join(home, "transactions/interrupted");
+    await mkdir(join(interrupted, "backup/skills/react"), { recursive: true });
+    await writeFile(join(interrupted, "backup/skills/react/SKILL.md"), "original\n");
+    await mkdir(join(home, "skills/react"), { recursive: true });
+    await writeFile(join(home, "skills/react/SKILL.md"), "user edit\n");
+    await writeFile(join(interrupted, "journal.json"), `${JSON.stringify({
+      version: 1,
+      phase: "prepared",
+      entries: [{ name: "react", metadataOnly: false, hadSkill: true, hadMetadata: false, installedHash: "a".repeat(64) }],
+    })}\n`);
+    const source = await makeCollection([{ name: "playwright" }]);
+
+    await expect(install({ source, target: { kind: "library" }, yes: true, cwd: project }))
+      .rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toBe("user edit\n");
+  });
+
+  it("reclaims an aged lock even when its PID was reused", async () => {
+    const stale = join(home, `transactions/locks/install-${process.pid}-${Date.now() - 31 * 60 * 1000}-stale`);
+    await mkdir(stale, { recursive: true });
+    const source = await makeCollection([{ name: "react" }]);
+
+    const result = await install({ source, target: { kind: "library" }, yes: true, cwd: project });
+
+    expect(result.status).toBe("installed");
+    expect(await pathExists(stale)).toBe(false);
   });
 
   it("normalizes terminal controls in discovered descriptions", async () => {

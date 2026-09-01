@@ -80,16 +80,18 @@ function parseActivationJournal(value: unknown): ActivationJournal | null {
 async function acquireProjectLock(root: string): Promise<() => Promise<void>> {
   const lockRoot = join(root, ".skillenv", "locks");
   await mkdir(lockRoot, { recursive: true });
-  const name = `activation-${process.pid}-${randomUUID()}`;
+  const name = `activation-${process.pid}-${Date.now()}-${randomUUID()}`;
   const owned = join(lockRoot, name);
   await mkdir(owned);
   try {
     const contenders = await readdir(lockRoot, { withFileTypes: true });
     let active = false;
     for (const contender of contenders.filter((entry) => entry.isDirectory() && entry.name !== name)) {
-      const pid = Number(/^activation-(\d+)-/.exec(contender.name)?.[1]);
+      const match = /^activation-(\d+)-(\d+)-/.exec(contender.name);
+      const pid = Number(match?.[1]);
+      const createdAt = Number(match?.[2]);
       try {
-        if (Number.isInteger(pid) && pid > 0) process.kill(pid, 0);
+        if (Number.isInteger(pid) && pid > 0 && Number.isFinite(createdAt) && Date.now() - createdAt < 30 * 60 * 1000) process.kill(pid, 0);
         else throw Object.assign(new Error(), { code: "ESRCH" });
         active = true;
       } catch (error) {
@@ -142,7 +144,7 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
         const backup = join(root, "backup", previous.path);
         if (await pathExists(backup)) {
           const destination = resolveManagedPath(project.root, previous.path, previous.skill);
-          await rm(destination, { recursive: true, force: true });
+          if (await pathExists(destination)) throw new SkillenvError(`Interrupted activation path was recreated: ${previous.path}`, "RECOVERY_REQUIRED");
           await mkdir(dirname(destination), { recursive: true });
           await rename(backup, destination);
         }

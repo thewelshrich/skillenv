@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { cp, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { SkillenvError } from "./errors.js";
+import { withEnvironmentLock } from "./environments.js";
 import { copySkillDirectory, hashDirectory, inferSkillName, pathExists, readJson, writeJson } from "./fs.js";
 import { environmentsDir, libraryDir, metadataDir, transactionsDir } from "./paths.js";
 import { environmentSchema, nameSchema, type Environment, type SkillMetadata } from "./schema.js";
@@ -56,6 +57,7 @@ export interface PreparedSkill {
 export interface LibraryInspection {
   conflicts: string[];
   unchanged: string[];
+  fingerprints: Record<string, string>;
 }
 
 interface TransactionEntry {
@@ -63,6 +65,7 @@ interface TransactionEntry {
   metadataOnly: boolean;
   hadSkill: boolean;
   hadMetadata: boolean;
+  installedHash?: string;
 }
 
 interface TransactionJournal {
@@ -82,7 +85,9 @@ function transactionJournal(value: unknown): TransactionJournal | null {
     const item = entry as Partial<TransactionEntry>;
     const parsedName = nameSchema.safeParse(item.name);
     if (!parsedName.success || typeof item.metadataOnly !== "boolean" || typeof item.hadSkill !== "boolean" || typeof item.hadMetadata !== "boolean") return null;
-    entries.push({ name: parsedName.data, metadataOnly: item.metadataOnly, hadSkill: item.hadSkill, hadMetadata: item.hadMetadata });
+    if (!item.metadataOnly && (typeof item.installedHash !== "string" || !/^[a-f0-9]{64}$/.test(item.installedHash))) return null;
+    if (item.metadataOnly && item.installedHash !== undefined && (typeof item.installedHash !== "string" || !/^[a-f0-9]{64}$/.test(item.installedHash))) return null;
+    entries.push({ name: parsedName.data, metadataOnly: item.metadataOnly, hadSkill: item.hadSkill, hadMetadata: item.hadMetadata, ...(item.installedHash ? { installedHash: item.installedHash } : {}) });
   }
   let environment: TransactionJournal["environment"];
   if (candidate.environment !== undefined) {
@@ -97,6 +102,7 @@ function transactionJournal(value: unknown): TransactionJournal | null {
 }
 
 const locksDir = () => join(transactionsDir(), "locks");
+const LOCK_STALE_MS = 30 * 60 * 1000;
 
 function processIsRunning(pid: number): boolean {
   try {
@@ -109,16 +115,17 @@ function processIsRunning(pid: number): boolean {
 
 async function acquireLibraryLock(): Promise<() => Promise<void>> {
   await mkdir(locksDir(), { recursive: true });
-  const lockName = `install-${process.pid}-${randomUUID()}`;
+  const lockName = `install-${process.pid}-${Date.now()}-${randomUUID()}`;
   const ownedLock = join(locksDir(), lockName);
   await mkdir(ownedLock);
   try {
     const contenders = await readdir(locksDir(), { withFileTypes: true });
     let activeContender = false;
     for (const contender of contenders.filter((entry) => entry.isDirectory() && entry.name !== lockName)) {
-      const match = /^install-(\d+)-/.exec(contender.name);
+      const match = /^install-(\d+)-(\d+)-/.exec(contender.name);
       const pid = Number(match?.[1]);
-      if (Number.isInteger(pid) && pid > 0 && processIsRunning(pid)) activeContender = true;
+      const createdAt = Number(match?.[2]);
+      if (Number.isInteger(pid) && pid > 0 && processIsRunning(pid) && Number.isFinite(createdAt) && Date.now() - createdAt < LOCK_STALE_MS) activeContender = true;
       else await rm(join(locksDir(), contender.name), { recursive: true, force: true });
     }
     if (activeContender) throw new SkillenvError("Another skill installation is already updating the library", "LIBRARY_BUSY");
@@ -146,16 +153,18 @@ async function recoverLibraryTransactions(): Promise<void> {
     const backupMetadata = join(root, "backup", "metadata");
     if (journal?.version === 1 && journal.phase === "prepared") {
       if (journal.environment) {
-        const path = join(environmentsDir(), `${journal.environment.name}.json`);
-        const exists = await pathExists(path);
-        const current = exists ? environmentSchema.parse(await readJson(path)) : null;
-        const matches = (left: Environment | null, right: Environment | null) => JSON.stringify(left) === JSON.stringify(right);
-        if (matches(current, journal.environment.next)) {
-          if (journal.environment.previous) await writeJson(path, journal.environment.previous);
-          else await rm(path, { force: true });
-        } else if (!matches(current, journal.environment.previous)) {
-          throw new SkillenvError(`Environment '${journal.environment.name}' changed during interrupted recovery`, "RECOVERY_REQUIRED");
-        }
+        await withEnvironmentLock(async () => {
+          const path = join(environmentsDir(), `${journal.environment!.name}.json`);
+          const exists = await pathExists(path);
+          const current = exists ? environmentSchema.parse(await readJson(path)) : null;
+          const matches = (left: Environment | null, right: Environment | null) => JSON.stringify(left) === JSON.stringify(right);
+          if (matches(current, journal.environment!.next)) {
+            if (journal.environment!.previous) await writeJson(path, journal.environment!.previous);
+            else await rm(path, { force: true });
+          } else if (!matches(current, journal.environment!.previous)) {
+            throw new SkillenvError(`Environment '${journal.environment!.name}' changed during interrupted recovery`, "RECOVERY_REQUIRED");
+          }
+        });
       }
       for (const item of [...journal.entries].reverse()) {
         const destination = join(libraryDir(), item.name);
@@ -163,6 +172,10 @@ async function recoverLibraryTransactions(): Promise<void> {
         const skillBackup = join(backupSkills, item.name);
         const metadataBackup = join(backupMetadata, `${item.name}.json`);
         if (!item.metadataOnly) {
+          if (await entryExists(destination) && item.installedHash) {
+            const currentHash = await hashDirectory(destination, { includeModes: true }).catch(() => null);
+            if (currentHash !== item.installedHash) throw new SkillenvError(`Interrupted library skill was modified: ${item.name}`, "RECOVERY_REQUIRED");
+          }
           if (await pathExists(skillBackup)) {
             await rm(destination, { recursive: true, force: true });
             await mkdir(libraryDir(), { recursive: true });
@@ -210,9 +223,11 @@ async function recoverLibraryTransactions(): Promise<void> {
 export async function inspectLibrary(skills: readonly PreparedSkill[]): Promise<LibraryInspection> {
   const conflicts: string[] = [];
   const unchanged: string[] = [];
+  const fingerprints: Record<string, string> = {};
   for (const skill of skills) {
     const destination = join(libraryDir(), skill.name);
     const candidateHash = await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]), includeModes: true });
+    fingerprints[skill.name] = candidateHash;
     if (!(await entryExists(destination))) {
       if (await pathExists(join(metadataDir(), `${skill.name}.json`))) conflicts.push(skill.name);
       continue;
@@ -225,7 +240,7 @@ export async function inspectLibrary(skills: readonly PreparedSkill[]): Promise<
     if (existingHash === candidateHash) unchanged.push(skill.name);
     else conflicts.push(skill.name);
   }
-  return { conflicts, unchanged };
+  return { conflicts, unchanged, fingerprints };
 }
 
 export interface LibraryChange {
@@ -288,12 +303,18 @@ export async function installLibrarySkills(
     }
 
   try {
-    for (const skill of skills) await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]) });
+    for (const skill of skills) {
+      const current = await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]), includeModes: true });
+      if (current !== inspection.fingerprints[skill.name]) throw new SkillenvError(`Skill source changed during installation: ${skill.name}`, "SOURCE_CHANGED");
+    }
     await mkdir(stagedSkills, { recursive: true });
     await mkdir(stagedMetadata, { recursive: true });
     for (const skill of skills.filter((candidate) => metadataNames.has(candidate.name))) {
       const stagedSkill = join(stagedSkills, skill.name);
       if (!metadataOnly.has(skill.name)) await copySkillDirectory(skill.directory, stagedSkill);
+      if (!metadataOnly.has(skill.name)) {
+        journal.entries.find((entry) => entry.name === skill.name)!.installedHash = await hashDirectory(stagedSkill, { includeModes: true });
+      }
       const metadata: SkillMetadata = {
         version: 1,
         name: skill.name,
