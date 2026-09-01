@@ -293,6 +293,8 @@ export async function installLibrarySkills(
   const committed: CommitRecord[] = [];
   async function rollback(): Promise<void> {
     try {
+      journal.phase = "prepared";
+      await writeJson(join(transactionRoot, "journal.json"), journal);
       for (const record of [...committed].reverse()) {
         const { name } = record;
         if (record.skillInstalled) await rm(join(libraryDir(), name), { recursive: true, force: true });

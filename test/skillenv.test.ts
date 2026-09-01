@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -101,6 +101,36 @@ describe("skillenv", () => {
     expect(await pathExists(join(project, ".agents/skills/react"))).toBe(false);
     expect(await pathExists(join(project, ".skillenv/state.json"))).toBe(false);
     expect(await pathExists(join(home, "skills/react/SKILL.md"))).toBe(true);
+  });
+
+  it("recovers an activation interrupted during backup moves", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    await activate("frontend", project);
+    const previous = JSON.parse(await readFile(join(project, ".skillenv/state.json"), "utf8"));
+    const transaction = join(project, ".skillenv/staging-interrupted");
+    for (const path of [".agents/skills/react", ".claude/skills/react"]) {
+      await mkdir(join(transaction, "next", path, ".."), { recursive: true });
+      await cp(join(home, "skills/react"), join(transaction, "next", path), { recursive: true });
+    }
+    await mkdir(join(transaction, "backup/.agents/skills"), { recursive: true });
+    await rename(join(project, ".agents/skills/react"), join(transaction, "backup/.agents/skills/react"));
+    await writeFile(join(transaction, "journal.json"), `${JSON.stringify({
+      version: 1,
+      phase: "prepared",
+      previous,
+      planned: [
+        { skill: "react", path: ".agents/skills/react" },
+        { skill: "react", path: ".claude/skills/react" },
+      ],
+    })}\n`);
+
+    const status = await getStatus(project);
+
+    expect(status.state?.environment).toBe("frontend");
+    expect(status.drifted).toEqual([]);
+    expect(await pathExists(join(project, ".agents/skills/react/SKILL.md"))).toBe(true);
+    expect(await pathExists(transaction)).toBe(false);
   });
 
   it("refuses to delete a managed copy that was modified", async () => {

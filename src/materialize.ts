@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, rm } from "node:fs/promises";
+import { mkdir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { ZodError } from "zod";
 import { adapters, adapterSkillPath, isAdapterSkillPath } from "./adapters.js";
@@ -8,7 +8,7 @@ import { SkillenvError } from "./errors.js";
 import { copyDirectory, hashDirectory, pathExists, readJson, removeEmptyParents, writeJson } from "./fs.js";
 import { findProject, updateGitExclude, type Project } from "./git.js";
 import { requireSkill } from "./library.js";
-import { projectStateSchema, type ProjectState } from "./schema.js";
+import { nameSchema, projectStateSchema, type Environment, type ProjectState } from "./schema.js";
 
 function statePath(root: string): string {
   return join(root, ".skillenv", "state.json");
@@ -52,9 +52,111 @@ export interface ActivationResult {
   previousEnvironment: string | null;
 }
 
+interface ActivationJournal {
+  version: 1;
+  phase: "prepared" | "committed";
+  previous: ProjectState | null;
+  planned: Array<{ skill: string; path: string }>;
+}
+
+function parseActivationJournal(value: unknown): ActivationJournal | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<ActivationJournal>;
+  if (candidate.version !== 1 || (candidate.phase !== "prepared" && candidate.phase !== "committed") || !Array.isArray(candidate.planned)) return null;
+  const previous = candidate.previous === null ? null : projectStateSchema.safeParse(candidate.previous);
+  if (previous !== null && !previous.success) return null;
+  const planned: Array<{ skill: string; path: string }> = [];
+  for (const entry of candidate.planned) {
+    if (!entry || typeof entry !== "object") return null;
+    const item = entry as { skill?: unknown; path?: unknown };
+    const skill = nameSchema.safeParse(item.skill);
+    if (!skill.success || typeof item.path !== "string" || !isAdapterSkillPath(item.path, skill.data)) return null;
+    planned.push({ skill: skill.data, path: item.path });
+  }
+  return { version: 1, phase: candidate.phase, previous: previous === null ? null : previous.data, planned };
+}
+
+async function acquireProjectLock(root: string): Promise<() => Promise<void>> {
+  const lockRoot = join(root, ".skillenv", "locks");
+  await mkdir(lockRoot, { recursive: true });
+  const name = `activation-${process.pid}-${randomUUID()}`;
+  const owned = join(lockRoot, name);
+  await mkdir(owned);
+  try {
+    const contenders = await readdir(lockRoot, { withFileTypes: true });
+    let active = false;
+    for (const contender of contenders.filter((entry) => entry.isDirectory() && entry.name !== name)) {
+      const pid = Number(/^activation-(\d+)-/.exec(contender.name)?.[1]);
+      try {
+        if (Number.isInteger(pid) && pid > 0) process.kill(pid, 0);
+        else throw Object.assign(new Error(), { code: "ESRCH" });
+        active = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") await rm(join(lockRoot, contender.name), { recursive: true, force: true });
+        else active = true;
+      }
+    }
+    if (active) throw new SkillenvError("Another Skillenv operation is updating this project", "PROJECT_BUSY");
+  } catch (error) {
+    await rm(owned, { recursive: true, force: true });
+    throw error;
+  }
+  return async () => {
+    await rm(owned, { recursive: true, force: true });
+    await removeEmptyParents(lockRoot, root);
+  };
+}
+
+async function recoverActivationTransactions(project: Project): Promise<void> {
+  const skillenvRoot = join(project.root, ".skillenv");
+  const entries = await readdir(skillenvRoot, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  for (const entry of entries.filter((candidate) => candidate.isDirectory() && candidate.name.startsWith("staging-"))) {
+    const root = join(skillenvRoot, entry.name);
+    const journalPath = join(root, "journal.json");
+    if (!(await pathExists(journalPath))) {
+      await rm(root, { recursive: true, force: true });
+      continue;
+    }
+    const journal = parseActivationJournal(await readJson(journalPath));
+    if (!journal) throw new SkillenvError(`Invalid interrupted activation transaction: ${journalPath}`, "RECOVERY_REQUIRED");
+    if (journal.phase === "prepared") {
+      for (const planned of journal.planned) {
+        if (!(await pathExists(join(root, "next", planned.path)))) {
+          await rm(resolveManagedPath(project.root, planned.path, planned.skill), { recursive: true, force: true });
+        }
+      }
+      for (const previous of journal.previous?.managed ?? []) {
+        const backup = join(root, "backup", previous.path);
+        if (await pathExists(backup)) {
+          const destination = resolveManagedPath(project.root, previous.path, previous.skill);
+          await rm(destination, { recursive: true, force: true });
+          await mkdir(dirname(destination), { recursive: true });
+          await rename(backup, destination);
+        }
+      }
+      await (journal.previous ? writeJson(statePath(project.root), journal.previous) : rm(statePath(project.root), { force: true }));
+      await updateGitExclude(project, journal.previous?.managed.map((item) => item.path) ?? []);
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 export async function activate(environmentName: string, cwd = process.cwd()): Promise<ActivationResult> {
   const environment = await readEnvironment(environmentName);
   const project = await findProject(cwd);
+  const releaseLock = await acquireProjectLock(project.root);
+  try {
+    await recoverActivationTransactions(project);
+    return await activateLocked(environment, project);
+  } finally {
+    await releaseLock();
+  }
+}
+
+async function activateLocked(environment: Environment, project: Project): Promise<ActivationResult> {
   const previous = await readProjectState(project.root);
   await assertOwnedFilesUnchanged(project.root, previous);
 
@@ -72,9 +174,12 @@ export async function activate(environmentName: string, cwd = process.cwd()): Pr
 
   const stagingRoot = join(project.root, ".skillenv", `staging-${randomUUID()}`);
   const backupRoot = join(stagingRoot, "backup");
+  const journalPath = join(stagingRoot, "journal.json");
   const staged: Array<{ skill: string; path: string; stagedPath: string; hash: string }> = [];
   const installed: string[] = [];
   const backedUp: Array<{ skill: string; path: string; backupPath: string }> = [];
+  const journal: ActivationJournal = { version: 1, phase: "prepared", previous, planned };
+  let preserveStaging = false;
   try {
     for (const entry of planned) {
       const source = await requireSkill(entry.skill);
@@ -82,6 +187,7 @@ export async function activate(environmentName: string, cwd = process.cwd()): Pr
       await copyDirectory(source, stagedPath);
       staged.push({ ...entry, stagedPath, hash: await hashDirectory(stagedPath) });
     }
+    await writeJson(journalPath, journal);
 
     for (const entry of previous?.managed ?? []) {
       const backupPath = join(backupRoot, entry.path);
@@ -104,29 +210,37 @@ export async function activate(environmentName: string, cwd = process.cwd()): Pr
     };
     await writeJson(statePath(project.root), state);
     await updateGitExclude(project, state.managed.map((entry) => entry.path));
+    journal.phase = "committed";
+    await writeJson(journalPath, journal);
     return { project, state, previousEnvironment: previous?.environment ?? null };
   } catch (error) {
     const recoveryErrors: unknown[] = [];
+    const structuralRecoveryErrors: unknown[] = [];
+    const recordStructuralError = (recoveryError: unknown) => {
+      structuralRecoveryErrors.push(recoveryError);
+      recoveryErrors.push(recoveryError);
+    };
     for (const path of [...installed].reverse()) {
-      await rm(join(project.root, path), { recursive: true, force: true }).catch((recoveryError) => recoveryErrors.push(recoveryError));
+      await rm(join(project.root, path), { recursive: true, force: true }).catch(recordStructuralError);
     }
     for (const entry of [...backedUp].reverse()) {
       const destination = resolveManagedPath(project.root, entry.path, entry.skill);
-      await mkdir(dirname(destination), { recursive: true }).catch((recoveryError) => recoveryErrors.push(recoveryError));
-      await rename(entry.backupPath, destination).catch((recoveryError) => recoveryErrors.push(recoveryError));
+      await mkdir(dirname(destination), { recursive: true }).catch(recordStructuralError);
+      await rename(entry.backupPath, destination).catch(recordStructuralError);
     }
     await (previous ? writeJson(statePath(project.root), previous) : rm(statePath(project.root), { force: true }))
-      .catch((recoveryError) => recoveryErrors.push(recoveryError));
+      .catch(recordStructuralError);
     await updateGitExclude(project, previous?.managed.map((entry) => entry.path) ?? [])
       .catch((recoveryError) => recoveryErrors.push(recoveryError));
     if (recoveryErrors.length) {
+      preserveStaging = structuralRecoveryErrors.length > 0;
       const original = error instanceof Error ? error.message : String(error);
       const recovery = recoveryErrors.map((item) => item instanceof Error ? item.message : String(item)).join("; ");
       throw new SkillenvError(`Activation failed: ${original}. Automatic recovery was incomplete: ${recovery}`, "RECOVERY_REQUIRED");
     }
     throw error;
   } finally {
-    await rm(stagingRoot, { recursive: true, force: true });
+    if (!preserveStaging) await rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -138,30 +252,42 @@ export interface StatusResult {
 
 export async function getStatus(cwd = process.cwd()): Promise<StatusResult> {
   const project = await findProject(cwd);
-  const state = await readProjectState(project.root);
-  const drifted: string[] = [];
-  for (const entry of state?.managed ?? []) {
-    const absolute = resolveManagedPath(project.root, entry.path, entry.skill);
-    if (!(await pathExists(absolute)) || (await hashDirectory(absolute)) !== entry.hash) drifted.push(entry.path);
+  const releaseLock = await acquireProjectLock(project.root);
+  try {
+    await recoverActivationTransactions(project);
+    const state = await readProjectState(project.root);
+    const drifted: string[] = [];
+    for (const entry of state?.managed ?? []) {
+      const absolute = resolveManagedPath(project.root, entry.path, entry.skill);
+      if (!(await pathExists(absolute)) || (await hashDirectory(absolute)) !== entry.hash) drifted.push(entry.path);
+    }
+    return { project, state, drifted };
+  } finally {
+    await releaseLock();
   }
-  return { project, state, drifted };
 }
 
 export async function deactivate(cwd = process.cwd()): Promise<{ project: Project; environment: string | null }> {
   const project = await findProject(cwd);
-  const state = await readProjectState(project.root);
-  if (!state) {
+  const releaseLock = await acquireProjectLock(project.root);
+  try {
+    await recoverActivationTransactions(project);
+    const state = await readProjectState(project.root);
+    if (!state) {
+      await updateGitExclude(project, []);
+      return { project, environment: null };
+    }
+    await assertOwnedFilesUnchanged(project.root, state);
+    for (const entry of state.managed) {
+      const absolute = resolveManagedPath(project.root, entry.path, entry.skill);
+      await rm(absolute, { recursive: true });
+      await removeEmptyParents(dirname(absolute), project.root);
+    }
+    await rm(statePath(project.root));
+    await removeEmptyParents(dirname(statePath(project.root)), project.root);
     await updateGitExclude(project, []);
-    return { project, environment: null };
+    return { project, environment: state.environment };
+  } finally {
+    await releaseLock();
   }
-  await assertOwnedFilesUnchanged(project.root, state);
-  for (const entry of state.managed) {
-    const absolute = resolveManagedPath(project.root, entry.path, entry.skill);
-    await rm(absolute, { recursive: true });
-    await removeEmptyParents(dirname(absolute), project.root);
-  }
-  await rm(statePath(project.root));
-  await removeEmptyParents(dirname(statePath(project.root)), project.root);
-  await updateGitExclude(project, []);
-  return { project, environment: state.environment };
 }
