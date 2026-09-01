@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -9,6 +9,47 @@ import { hashDirectory, pathExists } from "./fs.js";
 import { nameSchema } from "./schema.js";
 
 const execFileAsync = promisify(execFile);
+
+export interface GitCloneAuthentication {
+  url: string;
+  env: NodeJS.ProcessEnv;
+}
+
+function decodeUrlCredential(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+export async function prepareGitCloneAuthentication(input: string, temporaryRoot: string): Promise<GitCloneAuthentication> {
+  let source: URL;
+  try {
+    source = new URL(input);
+  } catch {
+    return { url: input, env: process.env };
+  }
+  if (!source.username && !source.password) return { url: input, env: process.env };
+
+  const username = decodeUrlCredential(source.username);
+  const password = decodeUrlCredential(source.password);
+  source.username = "";
+  source.password = "";
+  const askpass = join(temporaryRoot, "git-askpass.sh");
+  await writeFile(askpass, '#!/bin/sh\ncase "$1" in\n  *Username*) printf \'%s\\n\' "$SKILLENV_GIT_USERNAME" ;;\n  *) printf \'%s\\n\' "$SKILLENV_GIT_PASSWORD" ;;\nesac\n', { mode: 0o700 });
+  await chmod(askpass, 0o700);
+  return {
+    url: source.toString(),
+    env: {
+      ...process.env,
+      GIT_ASKPASS: askpass,
+      GIT_TERMINAL_PROMPT: "0",
+      SKILLENV_GIT_USERNAME: username,
+      SKILLENV_GIT_PASSWORD: password,
+    },
+  };
+}
 
 export function sanitizeSourceInput(input: string): string {
   try {
@@ -164,10 +205,11 @@ export async function resolveSource(input: string): Promise<ResolvedSource> {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "skillenv-source-"));
   const checkout = join(temporaryRoot, "repository");
   try {
+    const authentication = await prepareGitCloneAuthentication(remote.url, temporaryRoot);
     const args = ["clone", "--depth", "1", "--filter=blob:none"];
     if (remote.ref) args.push("--branch", remote.ref);
-    args.push(remote.url, checkout);
-    await execFileAsync("git", args, { encoding: "utf8", maxBuffer: 1024 * 1024 });
+    args.push(authentication.url, checkout);
+    await execFileAsync("git", args, { encoding: "utf8", maxBuffer: 1024 * 1024, env: authentication.env });
     const { stdout } = await execFileAsync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" });
     const repositoryName = basename(new URL(remote.url.replace(/^git@([^:]+):/, "ssh://$1/")).pathname).replace(/\.git$/, "");
     const skills = await discoverSkills(checkout, repositoryName);

@@ -27,6 +27,7 @@ export interface InstallPlan {
   target: TargetDecision;
   activate: boolean;
   projectRoot: string | null;
+  projectGitExclude: boolean | null;
 }
 
 export type InstallResult =
@@ -118,6 +119,7 @@ export async function install(request: InstallRequest, interaction?: InstallInte
       target,
       activate: shouldActivate,
       projectRoot: shouldActivate ? status!.project.root : null,
+      projectGitExclude: shouldActivate ? Boolean(status!.project.gitExclude) : null,
     };
 
     if (request.dryRun) {

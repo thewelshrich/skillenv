@@ -58,7 +58,10 @@ export function registerAddCommands(program: Command): void {
       } else if (!interactive && result.status === "installed") {
         console.log(`${pc.green("Installed")} ${result.plan.skills.join(", ")}`);
         if (result.plan.target.kind === "environment") console.log(`${result.plan.target.create ? "Created" : "Updated"} environment ${result.plan.target.name}`);
-        if (result.plan.activate && result.plan.projectRoot) console.log(`Activated in ${result.plan.projectRoot}`);
+        if (result.plan.activate && result.plan.projectRoot) {
+          console.log(`Activated in ${result.plan.projectRoot}`);
+          if (result.plan.projectGitExclude === false) console.log("Note: this is not a Git repository, so generated files could not be locally excluded.");
+        }
       }
       } catch (error) {
         if (!options.json) throw error;

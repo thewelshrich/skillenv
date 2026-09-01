@@ -10,7 +10,7 @@ import { fingerprintEntry, hashDirectory, pathExists } from "../src/fs.js";
 import { installLibrarySkills } from "../src/library.js";
 import type { InstallInteraction, TargetDecision } from "../src/prompts.js";
 import type { Environment } from "../src/schema.js";
-import { resolveSource, sanitizeSourceInput, type SkillCandidate } from "../src/sources.js";
+import { prepareGitCloneAuthentication, resolveSource, sanitizeSourceInput, type SkillCandidate } from "../src/sources.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -108,6 +108,45 @@ describe("installer", () => {
       status: "error",
       error: { code: "INPUT_REQUIRED", message: "A source is required" },
     });
+  });
+
+  it("emits machine-readable parser errors in JSON mode", async () => {
+    const failure = await execFileAsync(process.execPath, ["--import", "tsx", "src/cli.ts", "add", "--json", "--env"], {
+      cwd: process.cwd(),
+      env: { ...process.env, SKILLENV_HOME: home },
+    }).catch((error: unknown) => error as { stdout: string; stderr: string; code: number });
+
+    expect("code" in failure ? failure.code : 0).toBe(1);
+    expect(failure.stderr).toBe("");
+    expect(JSON.parse(failure.stdout)).toMatchObject({
+      status: "error",
+      error: { code: "INVALID_INPUT" },
+    });
+  });
+
+  it("warns when add activates outside a Git repository", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    const nonGitProject = join(sandbox, "non-git-project");
+    await mkdir(nonGitProject);
+    const cli = join(process.cwd(), "src/cli.ts");
+    const tsxLoader = join(process.cwd(), "node_modules/tsx/dist/loader.mjs");
+
+    const { stdout } = await execFileAsync(process.execPath, ["--import", tsxLoader, cli, "add", source, "--all", "--create-env", "frontend", "--activate", "--yes"], {
+      cwd: nonGitProject,
+      env: { ...process.env, SKILLENV_HOME: home },
+    });
+
+    expect(stdout).toContain("Activated in ");
+    expect(stdout).toContain("Note: this is not a Git repository, so generated files could not be locally excluded.");
+  });
+
+  it("keeps Git credentials out of clone URLs and askpass scripts", async () => {
+    const prepared = await prepareGitCloneAuthentication("https://token:secret@example.com/owner/repo.git", sandbox);
+
+    expect(prepared.url).toBe("https://example.com/owner/repo.git");
+    expect(prepared.env.SKILLENV_GIT_USERNAME).toBe("token");
+    expect(prepared.env.SKILLENV_GIT_PASSWORD).toBe("secret");
+    expect(await readFile(prepared.env.GIT_ASKPASS!, "utf8")).not.toMatch(/token|secret/);
   });
 
   it("rejects explicitly empty Git refs", async () => {
@@ -412,6 +451,7 @@ describe("installer", () => {
       target: { kind: "environment", name: "frontend", create: false },
       activate: true,
       projectRoot: project,
+      projectGitExclude: true,
     })).toEqual([
       "Skills (2): react, playwright",
       "Target: personal library",
