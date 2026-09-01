@@ -137,7 +137,7 @@ async function acquireLibraryLock(): Promise<() => Promise<void>> {
   return async () => {
     if (released) return;
     released = true;
-    await rm(ownedLock, { recursive: true, force: true });
+    await rm(ownedLock, { recursive: true, force: true }).catch(() => {});
   };
 }
 
@@ -172,11 +172,12 @@ async function recoverLibraryTransactions(): Promise<void> {
         const skillBackup = join(backupSkills, item.name);
         const metadataBackup = join(backupMetadata, `${item.name}.json`);
         if (!item.metadataOnly) {
-          if (await entryExists(destination) && item.installedHash) {
+          const backupExists = await pathExists(skillBackup);
+          if (await entryExists(destination) && item.installedHash && (backupExists || !item.hadSkill)) {
             const currentHash = await hashDirectory(destination, { includeModes: true }).catch(() => null);
             if (currentHash !== item.installedHash) throw new SkillenvError(`Interrupted library skill was modified: ${item.name}`, "RECOVERY_REQUIRED");
           }
-          if (await pathExists(skillBackup)) {
+          if (backupExists) {
             await rm(destination, { recursive: true, force: true });
             await mkdir(libraryDir(), { recursive: true });
             await rename(skillBackup, destination);
@@ -224,7 +225,11 @@ export async function inspectLibrary(skills: readonly PreparedSkill[]): Promise<
   const conflicts: string[] = [];
   const unchanged: string[] = [];
   const fingerprints: Record<string, string> = {};
+  const existingNames = await listSkills();
+  const existingByCase = new Map(existingNames.map((name) => [name.toLocaleLowerCase("en-US"), name]));
   for (const skill of skills) {
+    const alias = existingByCase.get(skill.name.toLocaleLowerCase("en-US"));
+    if (alias && alias !== skill.name) throw new SkillenvError(`Library skill names '${alias}' and '${skill.name}' collide on case-insensitive filesystems`, "DUPLICATE_SKILL");
     const destination = join(libraryDir(), skill.name);
     const candidateHash = await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]), includeModes: true });
     fingerprints[skill.name] = candidateHash;
@@ -303,17 +308,15 @@ export async function installLibrarySkills(
     }
 
   try {
-    for (const skill of skills) {
-      const current = await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]), includeModes: true });
-      if (current !== inspection.fingerprints[skill.name]) throw new SkillenvError(`Skill source changed during installation: ${skill.name}`, "SOURCE_CHANGED");
-    }
     await mkdir(stagedSkills, { recursive: true });
     await mkdir(stagedMetadata, { recursive: true });
     for (const skill of skills.filter((candidate) => metadataNames.has(candidate.name))) {
       const stagedSkill = join(stagedSkills, skill.name);
       if (!metadataOnly.has(skill.name)) await copySkillDirectory(skill.directory, stagedSkill);
       if (!metadataOnly.has(skill.name)) {
-        journal.entries.find((entry) => entry.name === skill.name)!.installedHash = await hashDirectory(stagedSkill, { includeModes: true });
+        const stagedHash = await hashDirectory(stagedSkill, { includeModes: true });
+        if (stagedHash !== inspection.fingerprints[skill.name]) throw new SkillenvError(`Skill source changed during installation: ${skill.name}`, "SOURCE_CHANGED");
+        journal.entries.find((entry) => entry.name === skill.name)!.installedHash = stagedHash;
       }
       const metadata: SkillMetadata = {
         version: 1,
@@ -327,6 +330,10 @@ export async function installLibrarySkills(
         installedAt: new Date().toISOString(),
       };
       await writeJson(join(stagedMetadata, `${skill.name}.json`), metadata);
+    }
+    for (const skill of skills.filter((candidate) => unchanged.has(candidate.name))) {
+      const current = await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]), includeModes: true });
+      if (current !== inspection.fingerprints[skill.name]) throw new SkillenvError(`Skill source changed during installation: ${skill.name}`, "SOURCE_CHANGED");
     }
   } catch (error) {
     await rm(transactionRoot, { recursive: true, force: true });

@@ -133,8 +133,11 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
             const currentHash = await hashDirectory(destination);
             const previous = journal.previous?.managed.find((item) => item.path === planned.path);
             const backup = previous ? join(root, "backup", previous.path) : null;
-            if (currentHash === planned.hash) await rm(destination, { recursive: true, force: true });
-            else if (!(previous && currentHash === previous.hash && backup && !(await pathExists(backup)))) {
+            const backupExists = backup ? await pathExists(backup) : false;
+            if (previous && currentHash === previous.hash && !backupExists) {
+              // A prior recovery pass already restored this path.
+            } else if (currentHash === planned.hash) await rm(destination, { recursive: true, force: true });
+            else if (!(previous && currentHash === previous.hash && backup && !backupExists)) {
               throw new SkillenvError(`Interrupted activation path was modified: ${planned.path}`, "RECOVERY_REQUIRED");
             }
           }

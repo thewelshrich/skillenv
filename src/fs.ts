@@ -49,8 +49,11 @@ export async function copySkillDirectory(source: string, destination: string): P
 }
 
 export async function hashDirectory(root: string, options: { ignoreNames?: ReadonlySet<string>; includeModes?: boolean } = {}): Promise<string> {
-  if ((await lstat(root)).isSymbolicLink()) throw new SkillenvError("Symbolic links are not supported as skill roots");
+  const rootStat = await lstat(root);
+  if (rootStat.isSymbolicLink()) throw new SkillenvError("Symbolic links are not supported as skill roots");
+  if (!rootStat.isDirectory()) throw new SkillenvError("Skill roots must be directories");
   const hash = createHash("sha256");
+  if (options.includeModes) hash.update(`m:${rootStat.mode & 0o777}\0`);
 
   async function visit(directory: string, prefix = ""): Promise<void> {
     const entries = await readdir(directory, { withFileTypes: true });
@@ -70,6 +73,8 @@ export async function hashDirectory(root: string, options: { ignoreNames?: Reado
         hash.update(`f:${relative}\0`);
         hash.update(await readFile(absolute));
         hash.update("\0");
+      } else {
+        throw new SkillenvError(`Unsupported filesystem entry in skill: ${relative}`);
       }
     }
   }

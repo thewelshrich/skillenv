@@ -358,6 +358,34 @@ describe("installer", () => {
     if (result.status === "planned") expect(result.plan.replacing).toEqual(["react"]);
   });
 
+  it("treats skill root mode changes as library conflicts", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    const base = { source, target: { kind: "library" } as const, yes: true, cwd: project };
+    await install(base);
+    await chmod(join(source, "skills/react"), 0o700);
+
+    const result = await install({ ...base, replace: true, dryRun: true });
+
+    expect(result.status).toBe("planned");
+    if (result.status === "planned") expect(result.plan.replacing).toEqual(["react"]);
+  });
+
+  it("rejects case aliases of skills already in the library", async () => {
+    await install({ source: await makeCollection([{ name: "react" }]), target: { kind: "library" }, yes: true, cwd: project });
+    const alias = await makeCollection([{ name: "React" }]);
+
+    await expect(install({ source: alias, target: { kind: "library" }, yes: true, cwd: project }))
+      .rejects.toMatchObject({ code: "DUPLICATE_SKILL" });
+  });
+
+  it("rejects special filesystem entries during dry-run validation", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    await execFileAsync("mkfifo", [join(source, "skills/react/pipe")]);
+
+    await expect(install({ source, target: { kind: "library" }, dryRun: true, cwd: project }))
+      .rejects.toThrow("Unsupported filesystem entry");
+  });
+
   it("serializes concurrent library updates", async () => {
     const firstSource = await resolveSource(await makeCollection([{ name: "react" }]));
     const secondSource = await resolveSource(await makeCollection([{ name: "playwright" }]));
