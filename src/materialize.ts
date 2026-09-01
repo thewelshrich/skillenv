@@ -71,22 +71,29 @@ export async function activate(environmentName: string, cwd = process.cwd()): Pr
   }
 
   const stagingRoot = join(project.root, ".skillenv", `staging-${randomUUID()}`);
+  const backupRoot = join(stagingRoot, "backup");
   const staged: Array<{ skill: string; path: string; stagedPath: string; hash: string }> = [];
+  const installed: string[] = [];
+  const backedUp: Array<{ skill: string; path: string; backupPath: string }> = [];
   try {
     for (const entry of planned) {
       const source = await requireSkill(entry.skill);
-      const stagedPath = join(stagingRoot, entry.path);
+      const stagedPath = join(stagingRoot, "next", entry.path);
       await copyDirectory(source, stagedPath);
       staged.push({ ...entry, stagedPath, hash: await hashDirectory(stagedPath) });
     }
 
     for (const entry of previous?.managed ?? []) {
-      await rm(resolveManagedPath(project.root, entry.path, entry.skill), { recursive: true });
+      const backupPath = join(backupRoot, entry.path);
+      await mkdir(dirname(backupPath), { recursive: true });
+      await rename(resolveManagedPath(project.root, entry.path, entry.skill), backupPath);
+      backedUp.push({ skill: entry.skill, path: entry.path, backupPath });
     }
     for (const entry of staged) {
       const destination = join(project.root, entry.path);
       await mkdir(dirname(destination), { recursive: true });
       await rename(entry.stagedPath, destination);
+      installed.push(entry.path);
     }
 
     const state: ProjectState = {
@@ -98,6 +105,26 @@ export async function activate(environmentName: string, cwd = process.cwd()): Pr
     await writeJson(statePath(project.root), state);
     await updateGitExclude(project, state.managed.map((entry) => entry.path));
     return { project, state, previousEnvironment: previous?.environment ?? null };
+  } catch (error) {
+    const recoveryErrors: unknown[] = [];
+    for (const path of [...installed].reverse()) {
+      await rm(join(project.root, path), { recursive: true, force: true }).catch((recoveryError) => recoveryErrors.push(recoveryError));
+    }
+    for (const entry of [...backedUp].reverse()) {
+      const destination = resolveManagedPath(project.root, entry.path, entry.skill);
+      await mkdir(dirname(destination), { recursive: true }).catch((recoveryError) => recoveryErrors.push(recoveryError));
+      await rename(entry.backupPath, destination).catch((recoveryError) => recoveryErrors.push(recoveryError));
+    }
+    await (previous ? writeJson(statePath(project.root), previous) : rm(statePath(project.root), { force: true }))
+      .catch((recoveryError) => recoveryErrors.push(recoveryError));
+    await updateGitExclude(project, previous?.managed.map((entry) => entry.path) ?? [])
+      .catch((recoveryError) => recoveryErrors.push(recoveryError));
+    if (recoveryErrors.length) {
+      const original = error instanceof Error ? error.message : String(error);
+      const recovery = recoveryErrors.map((item) => item instanceof Error ? item.message : String(item)).join("; ");
+      throw new SkillenvError(`Activation failed: ${original}. Automatic recovery was incomplete: ${recovery}`, "RECOVERY_REQUIRED");
+    }
+    throw error;
   } finally {
     await rm(stagingRoot, { recursive: true, force: true });
   }

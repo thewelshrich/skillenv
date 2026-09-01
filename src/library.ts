@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { SkillenvError } from "./errors.js";
 import { copySkillDirectory, hashDirectory, inferSkillName, pathExists, readJson, writeJson } from "./fs.js";
@@ -79,7 +79,7 @@ function transactionJournal(value: unknown): TransactionJournal | null {
   return { version: 1, phase: candidate.phase, entries };
 }
 
-const lockPath = () => join(transactionsDir(), "install.lock");
+const locksDir = () => join(transactionsDir(), "locks");
 
 function processIsRunning(pid: number): boolean {
   try {
@@ -90,38 +90,36 @@ function processIsRunning(pid: number): boolean {
   }
 }
 
-async function acquireLibraryLock(retry = true): Promise<() => Promise<void>> {
-  await mkdir(transactionsDir(), { recursive: true });
-  let created = false;
+async function acquireLibraryLock(): Promise<() => Promise<void>> {
+  await mkdir(locksDir(), { recursive: true });
+  const lockName = `install-${process.pid}-${randomUUID()}`;
+  const ownedLock = join(locksDir(), lockName);
+  await mkdir(ownedLock);
   try {
-    const handle = await open(lockPath(), "wx");
-    created = true;
-    try {
-      await handle.writeFile(`${process.pid}\n`);
-    } finally {
-      await handle.close();
+    const contenders = await readdir(locksDir(), { withFileTypes: true });
+    let activeContender = false;
+    for (const contender of contenders.filter((entry) => entry.isDirectory() && entry.name !== lockName)) {
+      const match = /^install-(\d+)-/.exec(contender.name);
+      const pid = Number(match?.[1]);
+      if (Number.isInteger(pid) && pid > 0 && processIsRunning(pid)) activeContender = true;
+      else await rm(join(locksDir(), contender.name), { recursive: true, force: true });
     }
+    if (activeContender) throw new SkillenvError("Another skill installation is already updating the library", "LIBRARY_BUSY");
   } catch (error) {
-    if (created) await rm(lockPath(), { force: true });
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const owner = Number(await readFile(lockPath(), "utf8").catch(() => ""));
-    if (retry && Number.isInteger(owner) && owner > 0 && !processIsRunning(owner)) {
-      await rm(lockPath(), { force: true });
-      return acquireLibraryLock(false);
-    }
-    throw new SkillenvError("Another skill installation is already updating the library", "LIBRARY_BUSY");
+    await rm(ownedLock, { recursive: true, force: true });
+    throw error;
   }
   let released = false;
   return async () => {
     if (released) return;
     released = true;
-    await rm(lockPath(), { force: true });
+    await rm(ownedLock, { recursive: true, force: true });
   };
 }
 
 async function recoverLibraryTransactions(): Promise<void> {
   const entries = await readdir(transactionsDir(), { withFileTypes: true });
-  for (const entry of entries.filter((candidate) => candidate.isDirectory())) {
+  for (const entry of entries.filter((candidate) => candidate.isDirectory() && candidate.name !== "locks")) {
     const root = join(transactionsDir(), entry.name);
     const journalPath = join(root, "journal.json");
     const journalValue = await pathExists(journalPath) ? await readJson(journalPath) : null;
@@ -209,7 +207,7 @@ export interface LibraryChange {
 export async function installLibrarySkills(
   skills: readonly PreparedSkill[],
   source: { input: string; kind: "local" | "git"; revision: string | null },
-  options: { replace: boolean },
+  options: { replace: boolean; allowedConflicts?: readonly string[] },
 ): Promise<LibraryChange> {
   const releaseLock = await acquireLibraryLock();
   try {
@@ -217,6 +215,11 @@ export async function installLibrarySkills(
     const inspection = await inspectLibrary(skills);
     if (inspection.conflicts.length && !options.replace) {
       throw new SkillenvError(`Library conflicts: ${inspection.conflicts.join(", ")}`, "LIBRARY_CONFLICT");
+    }
+    if (options.allowedConflicts) {
+      const allowed = new Set(options.allowedConflicts);
+      const unexpected = inspection.conflicts.filter((name) => !allowed.has(name));
+      if (unexpected.length) throw new SkillenvError(`Library conflicts changed before installation: ${unexpected.join(", ")}`, "LIBRARY_CONFLICT_CHANGED");
     }
 
     const transactionRoot = join(transactionsDir(), randomUUID());

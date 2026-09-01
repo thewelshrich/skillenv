@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import pc from "picocolors";
 import { SkillenvError } from "../errors.js";
-import { install, type InstallRequest, type SkillSelection } from "../install.js";
+import { install, installPlanLines, type InstallRequest, type SkillSelection } from "../install.js";
 import { listSkills } from "../library.js";
 import { ClackInteraction, type TargetDecision } from "../prompts.js";
 
@@ -53,7 +53,7 @@ export function registerAddCommands(program: Command): void {
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
       } else if (!interactive && result.status === "planned") {
-        console.log(`${pc.bold("Installation plan")}\n${result.plan.skills.map((name) => `  ${name}`).join("\n")}`);
+        console.log(`${pc.bold("Installation plan")}\n${installPlanLines(result.plan).map((line) => `  ${line}`).join("\n")}`);
       } else if (!interactive && result.status === "installed") {
         console.log(`${pc.green("Installed")} ${result.plan.skills.join(", ")}`);
         if (result.plan.target.kind === "environment") console.log(`${result.plan.target.create ? "Created" : "Updated"} environment ${result.plan.target.name}`);

@@ -10,6 +10,10 @@ function environmentPath(name: string): string {
   return join(environmentsDir(), `${name}.json`);
 }
 
+export async function environmentExists(nameInput: string): Promise<boolean> {
+  return pathExists(environmentPath(nameSchema.parse(nameInput)));
+}
+
 export async function createEnvironment(nameInput: string): Promise<Environment> {
   const name = nameSchema.parse(nameInput);
   const path = environmentPath(name);

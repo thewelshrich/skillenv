@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -88,6 +88,19 @@ describe("skillenv", () => {
     await expect(activate("frontend", project)).rejects.toThrow("Refusing to overwrite unmanaged skill");
     expect(await readFile(join(existing, "SKILL.md"), "utf8")).toBe("project owned\n");
     expect(await pathExists(join(project, ".skillenv/state.json"))).toBe(false);
+  });
+
+  it("rolls back project files when activation fails before state is written", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    await mkdir(join(project, ".claude"), { recursive: true });
+    await symlink(join(project, "missing-skills-root"), join(project, ".claude/skills"));
+
+    await expect(activate("frontend", project)).rejects.toThrow();
+
+    expect(await pathExists(join(project, ".agents/skills/react"))).toBe(false);
+    expect(await pathExists(join(project, ".skillenv/state.json"))).toBe(false);
+    expect(await pathExists(join(home, "skills/react/SKILL.md"))).toBe(true);
   });
 
   it("refuses to delete a managed copy that was modified", async () => {

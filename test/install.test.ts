@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { install } from "../src/install.js";
+import { install, installPlanLines } from "../src/install.js";
 import { pathExists } from "../src/fs.js";
 import { installLibrarySkills } from "../src/library.js";
 import type { InstallInteraction, TargetDecision } from "../src/prompts.js";
@@ -15,17 +15,20 @@ const execFileAsync = promisify(execFile);
 
 class ScriptedInteraction implements InstallInteraction {
   previewed = false;
-  constructor(private readonly answers: { skills?: string[]; target?: TargetDecision; confirm?: boolean } = {}) {}
+  constructor(private readonly answers: { skills?: string[]; target?: TargetDecision; replace?: boolean; confirm?: boolean; onConfirm?: () => Promise<void> } = {}) {}
   intro(): void {}
   async source(): Promise<string> { throw new Error("Unexpected source prompt"); }
   async task<T>(_message: string, operation: () => Promise<T>): Promise<T> { return operation(); }
   async skills(candidates: readonly SkillCandidate[]): Promise<string[]> { return this.answers.skills ?? candidates.map((candidate) => candidate.name); }
-  async replace(): Promise<boolean> { return false; }
+  async replace(): Promise<boolean> { return this.answers.replace ?? false; }
   async target(_environments: readonly Environment[]): Promise<TargetDecision> { return this.answers.target ?? { kind: "library" }; }
   async environmentName(): Promise<string> { return "frontend"; }
   async activate(): Promise<boolean> { return false; }
   preview(): void { this.previewed = true; }
-  async confirm(): Promise<boolean> { return this.answers.confirm ?? true; }
+  async confirm(): Promise<boolean> {
+    await this.answers.onConfirm?.();
+    return this.answers.confirm ?? true;
+  }
   success(): void {}
   cancel(): void {}
 }
@@ -186,6 +189,24 @@ describe("installer", () => {
     expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toContain("second");
   });
 
+  it("reconfirms conflicts that appear after an interactive plan", async () => {
+    const installed = await makeCollection([{ name: "react", body: "old" }]);
+    await install({ source: installed, target: { kind: "library" }, yes: true, cwd: project });
+    const source = await makeCollection([{ name: "react", body: "new" }, { name: "playwright" }]);
+    const interaction = new ScriptedInteraction({
+      target: { kind: "library" },
+      replace: true,
+      onConfirm: async () => {
+        await mkdir(join(home, "skills/playwright"), { recursive: true });
+        await writeFile(join(home, "skills/playwright/SKILL.md"), "concurrent\n");
+      },
+    });
+
+    await expect(install({ source, selection: { kind: "all" }, cwd: project }, interaction))
+      .rejects.toMatchObject({ code: "LIBRARY_CONFLICT_CHANGED" });
+    expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toContain("old");
+  });
+
   it("supports dry runs without creating the Skillenv home", async () => {
     const source = await makeCollection([{ name: "react" }]);
     const result = await install({ source, target: { kind: "library" }, dryRun: true, cwd: project });
@@ -259,6 +280,43 @@ describe("installer", () => {
     const result = await install({ source, target: { kind: "library" }, yes: true, cwd: project });
 
     expect(result.status).toBe("installed");
+  });
+
+  it("validates only an explicitly targeted environment", async () => {
+    const first = await makeCollection([{ name: "react" }]);
+    await install({ source: first, target: { kind: "environment", name: "frontend", create: true }, yes: true, cwd: project });
+    await writeFile(join(home, "environments/broken.json"), "not json\n");
+    const second = await makeCollection([{ name: "playwright" }]);
+
+    const result = await install({ source: second, target: { kind: "environment", name: "frontend", create: false }, dryRun: true, cwd: project });
+
+    expect(result.status).toBe("planned");
+  });
+
+  it("formats complete human-readable installation plans", () => {
+    expect(installPlanLines({
+      source: "safe/source",
+      skills: ["react", "playwright"],
+      replacing: ["react"],
+      unchanged: ["playwright"],
+      target: { kind: "environment", name: "frontend", create: false },
+      activate: true,
+      projectRoot: project,
+    })).toEqual([
+      "Skills (2): react, playwright",
+      "Target: personal library",
+      "Replace: react",
+      "Already current: playwright",
+      "Environment: update frontend",
+      `Activation: ${project}`,
+    ]);
+  });
+
+  it("does not reinterpret local path errors as GitHub shorthand", async () => {
+    const parent = join(sandbox, "skills");
+    await writeFile(parent, "not a directory\n");
+
+    await expect(resolveSource(join(parent, "react"))).rejects.toMatchObject({ code: "ENOTDIR" });
   });
 
   it("treats executable mode changes as library conflicts", async () => {
@@ -349,6 +407,7 @@ describe("installer", () => {
     })).rejects.toThrow("Symbolic links are not supported");
 
     expect(await pathExists(join(home, "skills/react"))).toBe(false);
-    expect(await readdir(join(home, "transactions"))).toEqual([]);
+    expect(await readdir(join(home, "transactions"))).toEqual(["locks"]);
+    expect(await readdir(join(home, "transactions/locks"))).toEqual([]);
   });
 });

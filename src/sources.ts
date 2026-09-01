@@ -140,7 +140,10 @@ async function discoverSkills(root: string): Promise<SkillCandidate[]> {
 
 export async function resolveSource(input: string): Promise<ResolvedSource> {
   const local = resolve(input);
-  const localStat = await lstat(local).catch(() => null);
+  const localStat = await lstat(local).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
   if (localStat?.isSymbolicLink()) throw new SkillenvError(`Symbolic link sources are not supported: ${input}`, "INVALID_SKILL");
   if (localStat?.isDirectory()) {
     const skills = await discoverSkills(local);

@@ -1,4 +1,4 @@
-import { listEnvironments, putEnvironmentSkills, type EnvironmentChange } from "./environments.js";
+import { environmentExists, listEnvironments, putEnvironmentSkills, readEnvironment, type EnvironmentChange } from "./environments.js";
 import { CancelledError, SkillenvError } from "./errors.js";
 import { inspectLibrary, installLibrarySkills, type LibraryChange } from "./library.js";
 import { activate, deactivate, getStatus, type StatusResult } from "./materialize.js";
@@ -52,13 +52,13 @@ function selectCandidates(source: ResolvedSource, selection: SkillSelection | un
   return interaction.skills(source.skills).then((names) => source.skills.filter((skill) => names.includes(skill.name)));
 }
 
-function planLines(plan: InstallPlan): string[] {
-  const lines = [`${plan.skills.length} skill${plan.skills.length === 1 ? "" : "s"} → personal library`];
+export function installPlanLines(plan: InstallPlan): string[] {
+  const lines = [`Skills (${plan.skills.length}): ${plan.skills.join(", ")}`, "Target: personal library"];
   if (plan.replacing.length) lines.push(`Replace: ${plan.replacing.join(", ")}`);
   if (plan.unchanged.length) lines.push(`Already current: ${plan.unchanged.join(", ")}`);
-  if (plan.target.kind === "environment") lines.push(`${plan.target.create ? "Create" : "Update"} environment ${plan.target.name}`);
-  else lines.push("Library only");
-  if (plan.activate && plan.projectRoot) lines.push(`Activate in ${plan.projectRoot}`);
+  if (plan.target.kind === "environment") lines.push(`Environment: ${plan.target.create ? "create" : "update"} ${plan.target.name}`);
+  else lines.push("Environment: unchanged (library only)");
+  lines.push(plan.activate && plan.projectRoot ? `Activation: ${plan.projectRoot}` : "Activation: unchanged");
   return lines;
 }
 
@@ -76,13 +76,15 @@ export async function install(request: InstallRequest, interaction?: InstallInte
 
     const inspection = await inspectLibrary(selected);
     let replace = request.replace ?? false;
+    let allowedConflicts: string[] | undefined;
     if (inspection.conflicts.length && !replace) {
       if (!interaction) throw new SkillenvError(`Library conflicts: ${inspection.conflicts.join(", ")} (use --force to replace)`, "LIBRARY_CONFLICT");
       replace = await interaction.replace(inspection.conflicts);
       if (!replace) throw new CancelledError();
+      allowedConflicts = inspection.conflicts;
     }
 
-    const environments = !request.target || request.target.kind === "environment" ? await listEnvironments() : [];
+    const environments = !request.target ? await listEnvironments() : [];
     let status: StatusResult | null = null;
     let target = request.target;
     if (!target) {
@@ -93,9 +95,10 @@ export async function install(request: InstallRequest, interaction?: InstallInte
     if (target.kind === "environment") {
       const name = nameSchema.parse(target.name);
       target = { ...target, name };
-      const exists = environments.some((environment) => environment.name === name);
+      const exists = request.target ? await environmentExists(name) : environments.some((environment) => environment.name === name);
       if (target.create && exists) throw new SkillenvError(`Environment '${target.name}' already exists`);
       if (!target.create && !exists) throw new SkillenvError(`Unknown environment '${target.name}'`);
+      if (!target.create && request.target) await readEnvironment(name);
     }
 
     let shouldActivate = request.activate ?? false;
@@ -117,19 +120,19 @@ export async function install(request: InstallRequest, interaction?: InstallInte
     };
 
     if (request.dryRun) {
-      interaction?.preview(planLines(plan));
+      interaction?.preview(installPlanLines(plan));
       return { status: "planned", plan };
     }
     if (!request.yes) {
       if (!interaction) requireInput("Confirmation required; pass --yes for non-interactive installation");
-      if (!(await interaction.confirm(planLines(plan)))) throw new CancelledError();
+      if (!(await interaction.confirm(installPlanLines(plan)))) throw new CancelledError();
     }
 
     let libraryChange: LibraryChange | null = null;
     let environmentChange: EnvironmentChange | null = null;
     let activationAttempted = false;
     try {
-      libraryChange = await installLibrarySkills(selected, { input: source.input, kind: source.kind, revision: source.revision }, { replace });
+      libraryChange = await installLibrarySkills(selected, { input: source.input, kind: source.kind, revision: source.revision }, { replace, allowedConflicts });
       if (target.kind === "environment") {
         environmentChange = await putEnvironmentSkills(target, selected.map((skill) => skill.name));
         if (shouldActivate) {
