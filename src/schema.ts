@@ -22,6 +22,7 @@ export const managedEntrySchema = z.object({
 
 export const projectStateSchema = z.object({
   version: z.literal(1),
+  hashVersion: z.literal(2).optional(),
   environment: nameSchema,
   activatedAt: z.string(),
   managed: z.array(managedEntrySchema),

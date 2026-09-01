@@ -25,6 +25,13 @@ async function assertProjectMetadataRoot(root: string): Promise<void> {
   }
 }
 
+async function entryExists(path: string): Promise<boolean> {
+  return lstat(path).then(() => true).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+}
+
 function resolveManagedPath(root: string, path: string, skill: string): string {
   if (!isAdapterSkillPath(path, skill)) {
     throw new SkillenvError(`Refusing unsafe managed path in project state: ${path}`);
@@ -75,7 +82,7 @@ async function assertOwnedFilesUnchanged(root: string, state: ProjectState | nul
   for (const entry of state.managed) {
     const absolute = await checkedManagedPath(root, entry.path, entry.skill);
     if (!(await pathExists(absolute))) throw new SkillenvError(`Managed skill is missing: ${entry.path}. Restore it or remove .skillenv/state.json deliberately.`);
-    const currentHash = await hashDirectory(absolute);
+    const currentHash = await hashDirectory(absolute, { includeModes: state.hashVersion === 2 });
     if (currentHash !== entry.hash) {
       throw new SkillenvError(`Managed skill was modified: ${entry.path}. Skillenv will not overwrite or delete it.`);
     }
@@ -90,6 +97,7 @@ export interface ActivationResult {
 
 interface ActivationJournal {
   version: 1;
+  hashVersion?: 2;
   phase: "prepared" | "committed";
   previous: ProjectState | null;
   planned: Array<{ skill: string; path: string; hash: string }>;
@@ -98,7 +106,7 @@ interface ActivationJournal {
 function parseActivationJournal(value: unknown): ActivationJournal | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<ActivationJournal>;
-  if (candidate.version !== 1 || (candidate.phase !== "prepared" && candidate.phase !== "committed") || !Array.isArray(candidate.planned)) return null;
+  if (candidate.version !== 1 || (candidate.hashVersion !== undefined && candidate.hashVersion !== 2) || (candidate.phase !== "prepared" && candidate.phase !== "committed") || !Array.isArray(candidate.planned)) return null;
   const previous = candidate.previous === null ? null : projectStateSchema.safeParse(candidate.previous);
   if (previous !== null && !previous.success) return null;
   const planned: Array<{ skill: string; path: string; hash: string }> = [];
@@ -110,7 +118,7 @@ function parseActivationJournal(value: unknown): ActivationJournal | null {
     if (!skill.success || typeof item.path !== "string" || !isAdapterSkillPath(item.path, skill.data) || typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash)) return null;
     planned.push({ skill: skill.data, path: item.path, hash });
   }
-  return { version: 1, phase: candidate.phase, previous: previous === null ? null : previous.data, planned };
+  return { version: 1, ...(candidate.hashVersion === 2 ? { hashVersion: 2 as const } : {}), phase: candidate.phase, previous: previous === null ? null : previous.data, planned };
 }
 
 async function acquireProjectLock(root: string): Promise<() => Promise<void>> {
@@ -168,14 +176,15 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
         if (!(await pathExists(join(root, "next", planned.path)))) {
           const destination = await checkedManagedPath(project.root, planned.path, planned.skill);
           if (await pathExists(destination)) {
-            const currentHash = await hashDirectory(destination);
+            const plannedHash = await hashDirectory(destination, { includeModes: journal.hashVersion === 2 });
             const previous = journal.previous?.managed.find((item) => item.path === planned.path);
+            const previousHash = previous ? await hashDirectory(destination, { includeModes: journal.previous?.hashVersion === 2 }) : null;
             const backup = previous ? join(root, "backup", previous.path) : null;
             const backupExists = backup ? await pathExists(backup) : false;
-            if (previous && currentHash === previous.hash && !backupExists) {
+            if (previous && previousHash === previous.hash && !backupExists) {
               // A prior recovery pass already restored this path.
-            } else if (currentHash === planned.hash) await rm(destination, { recursive: true, force: true });
-            else if (!(previous && currentHash === previous.hash && backup && !backupExists)) {
+            } else if (plannedHash === planned.hash) await rm(destination, { recursive: true, force: true });
+            else if (!(previous && previousHash === previous.hash && backup && !backupExists)) {
               throw new SkillenvError(`Interrupted activation path was modified: ${planned.path}`, "RECOVERY_REQUIRED");
             }
           }
@@ -242,14 +251,14 @@ async function activateLocked(environment: Environment, project: Project): Promi
   const staged: Array<{ skill: string; path: string; stagedPath: string; hash: string }> = [];
   const installed: Array<{ skill: string; path: string; hash: string }> = [];
   const backedUp: Array<{ skill: string; path: string; backupPath: string }> = [];
-  const journal: ActivationJournal = { version: 1, phase: "prepared", previous, planned: [] };
+  const journal: ActivationJournal = { version: 1, hashVersion: 2, phase: "prepared", previous, planned: [] };
   let preserveStaging = false;
   try {
     for (const entry of planned) {
       const source = await requireSkill(entry.skill);
       const stagedPath = join(stagingRoot, "next", entry.path);
       await copyDirectory(source, stagedPath);
-      staged.push({ ...entry, stagedPath, hash: await hashDirectory(stagedPath) });
+      staged.push({ ...entry, stagedPath, hash: await hashDirectory(stagedPath, { includeModes: true }) });
     }
     journal.planned = staged.map(({ skill, path, hash }) => ({ skill, path, hash }));
     await writeJson(journalPath, journal);
@@ -257,11 +266,19 @@ async function activateLocked(environment: Environment, project: Project): Promi
     for (const entry of previous?.managed ?? []) {
       const backupPath = join(backupRoot, entry.path);
       await mkdir(dirname(backupPath), { recursive: true });
-      await rename(await checkedManagedPath(project.root, entry.path, entry.skill), backupPath);
+      const destination = await checkedManagedPath(project.root, entry.path, entry.skill);
+      if (await hashDirectory(destination, { includeModes: previous?.hashVersion === 2 }) !== entry.hash) {
+        throw new SkillenvError(`Managed skill changed while activating: ${entry.path}`, "PROJECT_CHANGED");
+      }
+      await rename(destination, backupPath);
       backedUp.push({ skill: entry.skill, path: entry.path, backupPath });
+      if (await hashDirectory(backupPath, { includeModes: previous?.hashVersion === 2 }) !== entry.hash) {
+        throw new SkillenvError(`Managed skill changed while activating: ${entry.path}`, "PROJECT_CHANGED");
+      }
     }
     for (const entry of staged) {
       const destination = await checkedManagedPath(project.root, entry.path, entry.skill);
+      if (await entryExists(destination)) throw new SkillenvError(`Activation destination was recreated: ${entry.path}`, "PROJECT_CHANGED");
       await mkdir(dirname(destination), { recursive: true });
       await rename(entry.stagedPath, destination);
       installed.push({ skill: entry.skill, path: entry.path, hash: entry.hash });
@@ -269,6 +286,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
 
     const state: ProjectState = {
       version: 1,
+      hashVersion: 2,
       environment: environment.name,
       activatedAt: new Date().toISOString(),
       managed: staged.map(({ skill, path, hash }) => ({ skill, path, hash })),
@@ -287,7 +305,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
       await checkedManagedPath(project.root, entry.path, entry.skill)
         .then(async (destination) => {
           if (await pathExists(destination)) {
-            const currentHash = await hashDirectory(destination);
+            const currentHash = await hashDirectory(destination, { includeModes: true });
             if (currentHash !== entry.hash) {
               throw new SkillenvError(`Installed activation path was modified during rollback: ${entry.path}`, "RECOVERY_REQUIRED");
             }
@@ -302,6 +320,10 @@ async function activateLocked(environment: Environment, project: Project): Promi
         return null;
       });
       if (!destination) continue;
+      if (await entryExists(destination)) {
+        recordStructuralError(new SkillenvError(`Activation destination was recreated during rollback: ${entry.path}`, "RECOVERY_REQUIRED"));
+        continue;
+      }
       await mkdir(dirname(destination), { recursive: true }).catch(recordStructuralError);
       await rename(entry.backupPath, destination).catch(recordStructuralError);
     }
@@ -341,7 +363,7 @@ export async function getStatus(cwd = process.cwd(), options: { recover?: boolea
   const drifted: string[] = [];
   for (const entry of state?.managed ?? []) {
     const absolute = await checkedManagedPath(project.root, entry.path, entry.skill);
-    if (!(await pathExists(absolute)) || (await hashDirectory(absolute)) !== entry.hash) drifted.push(entry.path);
+    if (!(await pathExists(absolute)) || (await hashDirectory(absolute, { includeModes: state!.hashVersion === 2 })) !== entry.hash) drifted.push(entry.path);
   }
   return { project, state, drifted };
 }

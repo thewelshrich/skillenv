@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { cp, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -130,6 +130,7 @@ describe("skillenv", () => {
     await rename(join(project, ".agents/skills/react"), join(transaction, "backup/.agents/skills/react"));
     await writeFile(join(transaction, "journal.json"), `${JSON.stringify({
       version: 1,
+      hashVersion: 2,
       phase: "prepared",
       previous,
       planned: [
@@ -250,6 +251,80 @@ describe("skillenv", () => {
     expect(status.drifted).toEqual([".agents/skills/react"]);
     await expect(deactivate(project)).rejects.toThrow("Managed skill was modified");
     expect(await readFile(managedFile, "utf8")).toBe("locally edited\n");
+  });
+
+  it("treats managed permission changes as drift", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    await activate("frontend", project);
+    const managedFile = join(project, ".agents/skills/react/SKILL.md");
+    await chmod(managedFile, 0o755);
+
+    const status = await getStatus(project);
+
+    expect(status.drifted).toContain(".agents/skills/react");
+    await expect(deactivate(project)).rejects.toThrow("Managed skill was modified");
+  });
+
+  it("continues to read legacy content-only activation hashes", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    await activate("frontend", project);
+    const statePath = join(project, ".skillenv/state.json");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    delete state.hashVersion;
+    for (const entry of state.managed) entry.hash = await hashDirectory(join(project, entry.path));
+    await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    const status = await getStatus(project);
+
+    expect(status.drifted).toEqual([]);
+  });
+
+  it("preserves managed edits made while refresh copies are staged", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    await activate("frontend", project);
+    const destination = join(project, ".agents/skills/react");
+    const editDuringStaging = (async () => {
+      for (let attempt = 0; attempt < 5000; attempt += 1) {
+        const entries = await readdir(join(project, ".skillenv"), { withFileTypes: true }).catch(() => []);
+        const staging = entries.find((entry) => entry.isDirectory() && entry.name.startsWith("staging-"));
+        if (staging && await pathExists(join(project, ".skillenv", staging.name, "next/.agents/skills/react"))) {
+          await writeFile(join(destination, "SKILL.md"), "late edit\n");
+          return;
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      throw new Error("Activation did not enter staging");
+    })();
+
+    await expect(activate("frontend", project)).rejects.toMatchObject({ code: "PROJECT_CHANGED" });
+    await editDuringStaging;
+    expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe("late edit\n");
+  });
+
+  it("preserves unmanaged destinations created while activation is staged", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    const destination = join(project, ".agents/skills/react");
+    const createDuringStaging = (async () => {
+      for (let attempt = 0; attempt < 5000; attempt += 1) {
+        const entries = await readdir(join(project, ".skillenv"), { withFileTypes: true }).catch(() => []);
+        const staging = entries.find((entry) => entry.isDirectory() && entry.name.startsWith("staging-"));
+        if (staging && await pathExists(join(project, ".skillenv", staging.name, "next/.agents/skills/react"))) {
+          await mkdir(destination, { recursive: true });
+          await writeFile(join(destination, "SKILL.md"), "unmanaged\n");
+          return;
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      throw new Error("Activation did not enter staging");
+    })();
+
+    await expect(activate("frontend", project)).rejects.toMatchObject({ code: "PROJECT_CHANGED" });
+    await createDuringStaging;
+    expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe("unmanaged\n");
   });
 
   it("deactivates cleanly and preserves non-Skillenv ignore rules", async () => {

@@ -194,7 +194,11 @@ async function recoverLibraryTransactions(): Promise<void> {
         const metadataBackup = join(backupMetadata, `${item.name}.json`);
         if (!item.metadataOnly) {
           const backupExists = await pathExists(skillBackup);
-          if (await entryExists(destination) && item.installedHash && (backupExists || !item.hadSkill)) {
+          const stagedExists = await entryExists(join(root, "staged", "skills", item.name));
+          if (await entryExists(destination) && stagedExists && (backupExists || !item.hadSkill)) {
+            throw new SkillenvError(`Interrupted library destination was recreated: ${item.name}`, "RECOVERY_REQUIRED");
+          }
+          if (await entryExists(destination) && !stagedExists && item.installedHash && (backupExists || !item.hadSkill)) {
             const currentHash = await hashDirectory(destination, { includeModes: true }).catch(() => null);
             if (currentHash !== item.installedHash) throw new SkillenvError(`Interrupted library skill was modified: ${item.name}`, "RECOVERY_REQUIRED");
           }
@@ -207,7 +211,11 @@ async function recoverLibraryTransactions(): Promise<void> {
           }
         }
         const metadataBackupExists = await entryExists(metadataBackup);
-        if (await entryExists(metadataDestination) && (metadataBackupExists || !item.hadMetadata)) {
+        const stagedMetadataExists = await entryExists(join(root, "staged", "metadata", `${item.name}.json`));
+        if (await entryExists(metadataDestination) && stagedMetadataExists && (metadataBackupExists || !item.hadMetadata)) {
+          throw new SkillenvError(`Interrupted library metadata destination was recreated: ${item.name}`, "RECOVERY_REQUIRED");
+        }
+        if (await entryExists(metadataDestination) && !stagedMetadataExists && (metadataBackupExists || !item.hadMetadata)) {
           const currentFingerprint = await fingerprintEntry(metadataDestination);
           if (!item.installedMetadataFingerprint || currentFingerprint !== item.installedMetadataFingerprint) {
             throw new SkillenvError(`Interrupted library metadata was modified: ${item.name}`, "RECOVERY_REQUIRED");
@@ -449,13 +457,15 @@ export async function installLibrarySkills(
       committed.push(record);
       const expected = journal.entries.find((entry) => entry.name === name)!;
       if (await entryExists(destination) !== expected.hadSkill || await entryExists(metadataDestination) !== expected.hadMetadata) {
-        throw new SkillenvError(`Library changed concurrently while installing: ${name}`, "LIBRARY_CONFLICT");
+        throw new SkillenvError(`Library changed concurrently while installing: ${name}`, "LIBRARY_CONFLICT_CHANGED");
       }
-      if (!metadataOnly.has(name) && await entryExists(destination)) {
+      if (expected.hadSkill) {
         const currentFingerprint = await fingerprintEntry(destination);
         if (currentFingerprint !== inspection.existingFingerprints[name]) {
           throw new SkillenvError(`Library skill changed while installing: ${name}`, "LIBRARY_CONFLICT_CHANGED");
         }
+      }
+      if (!metadataOnly.has(name) && await entryExists(destination)) {
         await mkdir(backupSkills, { recursive: true });
         const backup = join(backupSkills, name);
         await rename(destination, backup);
@@ -478,6 +488,7 @@ export async function installLibrarySkills(
         }
       }
       if (!metadataOnly.has(name)) {
+        if (await entryExists(destination)) throw new SkillenvError(`Library destination was recreated while installing: ${name}`, "LIBRARY_CONFLICT_CHANGED");
         await rename(join(stagedSkills, name), destination);
         record.skillInstalled = true;
       }
