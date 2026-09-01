@@ -49,6 +49,7 @@ export async function copySkillDirectory(source: string, destination: string): P
 }
 
 export async function hashDirectory(root: string, options: { ignoreNames?: ReadonlySet<string>; includeModes?: boolean } = {}): Promise<string> {
+  if ((await lstat(root)).isSymbolicLink()) throw new SkillenvError("Symbolic links are not supported as skill roots");
   const hash = createHash("sha256");
 
   async function visit(directory: string, prefix = ""): Promise<void> {

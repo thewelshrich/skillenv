@@ -92,6 +92,10 @@ export async function putEnvironmentSkills(
     environment,
     created: !previous,
     rollback: async () => {
+      const current = await readEnvironment(name);
+      if (JSON.stringify(current) !== JSON.stringify(environment)) {
+        throw new SkillenvError(`Environment '${name}' changed concurrently; refusing to overwrite it`, "ENVIRONMENT_CHANGED");
+      }
       if (previous) await writeJson(environmentPath(name), previous);
       else await rm(environmentPath(name), { force: true });
     },

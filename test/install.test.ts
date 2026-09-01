@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { install, installPlanLines } from "../src/install.js";
+import { putEnvironmentSkills } from "../src/environments.js";
 import { pathExists } from "../src/fs.js";
 import { installLibrarySkills } from "../src/library.js";
 import type { InstallInteraction, TargetDecision } from "../src/prompts.js";
@@ -262,6 +263,32 @@ describe("installer", () => {
     expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toContain("replacement");
   });
 
+  it("can replace a legacy root symlink when forced", async () => {
+    const source = await makeCollection([{ name: "react", body: "replacement" }]);
+    const outside = join(sandbox, "outside-skill");
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "SKILL.md"), await readFile(join(source, "skills/react/SKILL.md")));
+    await mkdir(join(home, "skills"), { recursive: true });
+    await symlink(outside, join(home, "skills/react"));
+
+    await install({ source, target: { kind: "library" }, replace: true, yes: true, cwd: project });
+
+    expect((await lstat(join(home, "skills/react"))).isSymbolicLink()).toBe(false);
+  });
+
+  it("allows force to replace orphaned metadata", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    await mkdir(join(home, "metadata"), { recursive: true });
+    await writeFile(join(home, "metadata/react.json"), "{}\n");
+    const request = { source, target: { kind: "library" } as const, yes: true, cwd: project };
+
+    await expect(install(request)).rejects.toMatchObject({ code: "LIBRARY_CONFLICT" });
+    const result = await install({ ...request, replace: true });
+
+    expect(result.status).toBe("installed");
+    expect(await pathExists(join(home, "skills/react/SKILL.md"))).toBe(true);
+  });
+
   it("does not inspect project state for an explicit library-only install", async () => {
     const source = await makeCollection([{ name: "react" }]);
     await mkdir(join(project, ".skillenv"), { recursive: true });
@@ -407,7 +434,24 @@ describe("installer", () => {
     })).rejects.toThrow("Symbolic links are not supported");
 
     expect(await pathExists(join(home, "skills/react"))).toBe(false);
-    expect(await readdir(join(home, "transactions"))).toEqual(["locks"]);
-    expect(await readdir(join(home, "transactions/locks"))).toEqual([]);
+    expect(await pathExists(join(home, "transactions"))).toBe(false);
+  });
+
+  it("rejects symbolic links during dry-run validation", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    await symlink(join(sandbox, "outside"), join(source, "skills/react/linked"));
+
+    await expect(install({ source, target: { kind: "library" }, dryRun: true, cwd: project }))
+      .rejects.toThrow("Symbolic links are not supported");
+  });
+
+  it("does not overwrite concurrent environment edits during rollback", async () => {
+    const source = await makeCollection([{ name: "react" }, { name: "playwright" }]);
+    await install({ source, selection: { kind: "all" }, target: { kind: "environment", name: "frontend", create: true }, yes: true, cwd: project });
+    const change = await putEnvironmentSkills({ name: "frontend", create: false }, ["react"]);
+    await writeFile(join(home, "environments/frontend.json"), `${JSON.stringify({ version: 1, name: "frontend", skills: ["playwright"] }, null, 2)}\n`);
+
+    await expect(change.rollback()).rejects.toMatchObject({ code: "ENVIRONMENT_CHANGED" });
+    expect(JSON.parse(await readFile(join(home, "environments/frontend.json"), "utf8")).skills).toEqual(["playwright"]);
   });
 });

@@ -1,11 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { SkillenvError } from "./errors.js";
 import { copySkillDirectory, hashDirectory, inferSkillName, pathExists, readJson, writeJson } from "./fs.js";
 import { libraryDir, metadataDir, transactionsDir } from "./paths.js";
 import { nameSchema, type SkillMetadata } from "./schema.js";
 import { sanitizeSourceInput } from "./sources.js";
+
+async function entryExists(path: string): Promise<boolean> {
+  return lstat(path).then(() => true).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+}
 
 export async function addSkill(sourceInput: string, options: { name?: string; force?: boolean } = {}): Promise<string> {
   const source = resolve(sourceInput);
@@ -183,8 +190,11 @@ export async function inspectLibrary(skills: readonly PreparedSkill[]): Promise<
   const unchanged: string[] = [];
   for (const skill of skills) {
     const destination = join(libraryDir(), skill.name);
-    if (!(await pathExists(destination))) continue;
     const candidateHash = await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]), includeModes: true });
+    if (!(await entryExists(destination))) {
+      if (await pathExists(join(metadataDir(), `${skill.name}.json`))) conflicts.push(skill.name);
+      continue;
+    }
     const existingHash = await hashDirectory(destination, { includeModes: true }).catch(() => null);
     if (existingHash === null) {
       conflicts.push(skill.name);
@@ -241,7 +251,7 @@ export async function installLibrarySkills(
       entries: await Promise.all([...metadataNames].map(async (name) => ({
         name,
         metadataOnly: metadataOnly.has(name),
-        hadSkill: await pathExists(join(libraryDir(), name)),
+        hadSkill: await entryExists(join(libraryDir(), name)),
         hadMetadata: await pathExists(join(metadataDir(), `${name}.json`)),
       }))),
     };
@@ -323,10 +333,10 @@ export async function installLibrarySkills(
       const record: CommitRecord = { name, skillBackedUp: false, metadataBackedUp: false, skillInstalled: false, metadataInstalled: false };
       committed.push(record);
       const expected = journal.entries.find((entry) => entry.name === name)!;
-      if (await pathExists(destination) !== expected.hadSkill || await pathExists(metadataDestination) !== expected.hadMetadata) {
+      if (await entryExists(destination) !== expected.hadSkill || await pathExists(metadataDestination) !== expected.hadMetadata) {
         throw new SkillenvError(`Library changed concurrently while installing: ${name}`, "LIBRARY_CONFLICT");
       }
-      if (!metadataOnly.has(name) && await pathExists(destination)) {
+      if (!metadataOnly.has(name) && await entryExists(destination)) {
         await mkdir(backupSkills, { recursive: true });
         await rename(destination, join(backupSkills, name));
         record.skillBackedUp = true;
@@ -343,8 +353,6 @@ export async function installLibrarySkills(
       await rename(join(stagedMetadata, `${name}.json`), metadataDestination);
       record.metadataInstalled = true;
     }
-    journal.phase = "committed";
-    await writeJson(join(transactionRoot, "journal.json"), journal);
   } catch (error) {
     await rollback();
     throw error;
@@ -357,7 +365,11 @@ export async function installLibrarySkills(
       rollback,
       finalize: async () => {
         try {
-          await rm(transactionRoot, { recursive: true, force: true });
+          journal.phase = "committed";
+          await writeJson(join(transactionRoot, "journal.json"), journal).catch(async () => {
+            await rm(transactionRoot, { recursive: true, force: true });
+          });
+          await rm(transactionRoot, { recursive: true, force: true }).catch(() => {});
         } finally {
           await releaseLock();
         }

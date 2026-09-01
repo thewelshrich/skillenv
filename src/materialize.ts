@@ -102,8 +102,8 @@ async function acquireProjectLock(root: string): Promise<() => Promise<void>> {
     throw error;
   }
   return async () => {
-    await rm(owned, { recursive: true, force: true });
-    await removeEmptyParents(lockRoot, root);
+    await rm(owned, { recursive: true, force: true }).catch(() => {});
+    await removeEmptyParents(lockRoot, root).catch(() => {});
   };
 }
 

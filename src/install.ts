@@ -1,7 +1,7 @@
 import { environmentExists, listEnvironments, putEnvironmentSkills, readEnvironment, type EnvironmentChange } from "./environments.js";
 import { CancelledError, SkillenvError } from "./errors.js";
 import { inspectLibrary, installLibrarySkills, type LibraryChange } from "./library.js";
-import { activate, deactivate, getStatus, type StatusResult } from "./materialize.js";
+import { activate, getStatus, type StatusResult } from "./materialize.js";
 import type { InstallInteraction, TargetDecision } from "./prompts.js";
 import { nameSchema } from "./schema.js";
 import { resolveSource, sanitizeSourceInput, type ResolvedSource, type SkillCandidate } from "./sources.js";
@@ -130,32 +130,22 @@ export async function install(request: InstallRequest, interaction?: InstallInte
 
     let libraryChange: LibraryChange | null = null;
     let environmentChange: EnvironmentChange | null = null;
-    let activationAttempted = false;
     try {
       libraryChange = await installLibrarySkills(selected, { input: source.input, kind: source.kind, revision: source.revision }, { replace, allowedConflicts });
       if (target.kind === "environment") {
         environmentChange = await putEnvironmentSkills(target, selected.map((skill) => skill.name));
         if (shouldActivate) {
-          activationAttempted = true;
           await activate(target.name, cwd);
         }
       }
     } catch (error) {
       const recoveryErrors: unknown[] = [];
-      let environmentRestored = true;
-      let libraryRestored = true;
       await environmentChange?.rollback().catch((recoveryError) => {
-        environmentRestored = false;
         recoveryErrors.push(recoveryError);
       });
       await libraryChange?.rollback().catch((recoveryError) => {
-        libraryRestored = false;
         recoveryErrors.push(recoveryError);
       });
-      if (activationAttempted && environmentRestored && libraryRestored) {
-        const previousEnvironment = status?.state?.environment ?? null;
-        await (previousEnvironment ? activate(previousEnvironment, cwd) : deactivate(cwd)).catch((recoveryError) => recoveryErrors.push(recoveryError));
-      }
       if (recoveryErrors.length) {
         const original = error instanceof Error ? error.message : String(error);
         const recovery = recoveryErrors.map((item) => item instanceof Error ? item.message : String(item)).join("; ");
