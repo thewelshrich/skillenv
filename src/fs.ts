@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { cp, mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { SkillenvError } from "./errors.js";
 
 export async function pathExists(path: string): Promise<boolean> {
@@ -32,13 +32,24 @@ export async function copyDirectory(source: string, destination: string): Promis
   await cp(source, destination, { recursive: true, errorOnExist: true, force: false });
 }
 
-export async function hashDirectory(root: string): Promise<string> {
+export async function copySkillDirectory(source: string, destination: string): Promise<void> {
+  await mkdir(dirname(destination), { recursive: true });
+  await cp(source, destination, {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+    filter: (path) => !relative(source, path).split(sep).includes(".git"),
+  });
+}
+
+export async function hashDirectory(root: string, options: { ignoreNames?: ReadonlySet<string> } = {}): Promise<string> {
   const hash = createHash("sha256");
 
   async function visit(directory: string, prefix = ""): Promise<void> {
     const entries = await readdir(directory, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+      if (options.ignoreNames?.has(entry.name)) continue;
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
       const absolute = join(directory, entry.name);
       if (entry.isSymbolicLink()) {

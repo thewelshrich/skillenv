@@ -61,3 +61,35 @@ export async function deleteEnvironment(nameInput: string): Promise<void> {
   if (!(await pathExists(environmentPath(name)))) throw new SkillenvError(`Unknown environment '${name}'`);
   await rm(environmentPath(name));
 }
+
+export interface EnvironmentChange {
+  environment: Environment;
+  created: boolean;
+  rollback(): Promise<void>;
+}
+
+export async function putEnvironmentSkills(
+  target: { name: string; create: boolean },
+  skills: readonly string[],
+): Promise<EnvironmentChange> {
+  const name = nameSchema.parse(target.name);
+  const exists = await pathExists(environmentPath(name));
+  if (target.create && exists) throw new SkillenvError(`Environment '${name}' already exists`);
+  if (!target.create && !exists) throw new SkillenvError(`Unknown environment '${name}'`);
+
+  const previous = exists ? await readEnvironment(name) : null;
+  const environment: Environment = {
+    version: 1,
+    name,
+    skills: [...new Set([...(previous?.skills ?? []), ...skills])].sort(),
+  };
+  await writeJson(environmentPath(name), environment);
+  return {
+    environment,
+    created: !previous,
+    rollback: async () => {
+      if (previous) await writeJson(environmentPath(name), previous);
+      else await rm(environmentPath(name), { force: true });
+    },
+  };
+}
