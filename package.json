@@ -1,0 +1,56 @@
+{
+  "name": "skillenv",
+  "version": "0.1.0",
+  "description": "Virtual environments for agent skills",
+  "type": "module",
+  "bin": {
+    "skillenv": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup src/cli.ts --format esm --dts --clean",
+    "check": "npm run typecheck && npm test && npm run build",
+    "dev": "tsx src/cli.ts",
+    "prepublishOnly": "npm run check",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "agent-skills",
+    "ai-agents",
+    "cli",
+    "codex",
+    "claude"
+  ],
+  "homepage": "https://github.com/thewelshrich/skillenv#readme",
+  "bugs": {
+    "url": "https://github.com/thewelshrich/skillenv/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thewelshrich/skillenv.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^14.0.0",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
