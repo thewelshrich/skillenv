@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { cp, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -217,6 +217,19 @@ describe("skillenv", () => {
     await expect(activate("frontend", project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     await editWhenInstalled;
     expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe("user edit\n");
+  });
+
+  it("preserves activation recovery state when Git exclude rollback fails", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    const gitExclude = join(project, ".git/info/exclude");
+    await rm(gitExclude);
+    await mkdir(gitExclude);
+
+    await expect(activate("frontend", project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+
+    const metadataEntries = await readdir(join(project, ".skillenv"));
+    expect(metadataEntries.some((entry) => entry.startsWith("staging-"))).toBe(true);
   });
 
   it("reads inactive status without creating project state", async () => {

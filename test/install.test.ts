@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -487,6 +487,28 @@ describe("installer", () => {
 
     await expect(change.rollback()).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toBe("user edit\n");
+  });
+
+  it("refuses to replace a library copy edited after inspection", async () => {
+    await install({ source: await makeCollection([{ name: "react", body: "old" }]), target: { kind: "library" }, yes: true, cwd: project });
+    const replacement = await resolveSource(await makeCollection([{ name: "react", body: "new" }]));
+    const editDuringStaging = (async () => {
+      for (let attempt = 0; attempt < 5000; attempt += 1) {
+        const transactions = await readdir(join(home, "transactions"), { withFileTypes: true }).catch(() => []);
+        if (transactions.some((entry) => entry.isDirectory() && entry.name !== "locks")) {
+          await writeFile(join(home, "skills/react/SKILL.md"), "late edit\n");
+          return;
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      throw new Error("Installation did not enter staging");
+    })();
+
+    await expect(installLibrarySkills(replacement.skills, { input: replacement.input, kind: replacement.kind, revision: null }, { replace: true }))
+      .rejects.toMatchObject({ code: "LIBRARY_CONFLICT_CHANGED" });
+    await editDuringStaging;
+    expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toBe("late edit\n");
+    await replacement.cleanup();
   });
 
   it("recovers an interrupted library transaction before installing", async () => {

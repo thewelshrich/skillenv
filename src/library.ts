@@ -3,7 +3,7 @@ import { cp, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { SkillenvError } from "./errors.js";
 import { withEnvironmentLock } from "./environments.js";
-import { copySkillDirectory, hashDirectory, inferSkillName, pathExists, readJson, writeJson } from "./fs.js";
+import { copySkillDirectory, fingerprintEntry, hashDirectory, inferSkillName, pathExists, readJson, writeJson } from "./fs.js";
 import { environmentsDir, libraryDir, metadataDir, transactionsDir } from "./paths.js";
 import { environmentSchema, nameSchema, type Environment, type SkillMetadata } from "./schema.js";
 import { sanitizeSourceInput } from "./sources.js";
@@ -58,6 +58,8 @@ export interface LibraryInspection {
   conflicts: string[];
   unchanged: string[];
   fingerprints: Record<string, string>;
+  existingFingerprints: Record<string, string>;
+  metadataFingerprints: Record<string, string>;
 }
 
 interface TransactionEntry {
@@ -225,6 +227,8 @@ export async function inspectLibrary(skills: readonly PreparedSkill[]): Promise<
   const conflicts: string[] = [];
   const unchanged: string[] = [];
   const fingerprints: Record<string, string> = {};
+  const existingFingerprints: Record<string, string> = {};
+  const metadataFingerprints: Record<string, string> = {};
   const existingNames = await listSkills();
   const existingByCase = new Map(existingNames.map((name) => [name.toLocaleLowerCase("en-US"), name]));
   for (const skill of skills) {
@@ -233,10 +237,14 @@ export async function inspectLibrary(skills: readonly PreparedSkill[]): Promise<
     const destination = join(libraryDir(), skill.name);
     const candidateHash = await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]), includeModes: true });
     fingerprints[skill.name] = candidateHash;
+    const metadataPath = join(metadataDir(), `${skill.name}.json`);
+    const metadataExists = await entryExists(metadataPath);
+    if (metadataExists) metadataFingerprints[skill.name] = await fingerprintEntry(metadataPath);
     if (!(await entryExists(destination))) {
-      if (await pathExists(join(metadataDir(), `${skill.name}.json`))) conflicts.push(skill.name);
+      if (metadataExists) conflicts.push(skill.name);
       continue;
     }
+    existingFingerprints[skill.name] = await fingerprintEntry(destination);
     const existingHash = await hashDirectory(destination, { includeModes: true }).catch(() => null);
     if (existingHash === null) {
       conflicts.push(skill.name);
@@ -245,7 +253,7 @@ export async function inspectLibrary(skills: readonly PreparedSkill[]): Promise<
     if (existingHash === candidateHash) unchanged.push(skill.name);
     else conflicts.push(skill.name);
   }
-  return { conflicts, unchanged, fingerprints };
+  return { conflicts, unchanged, fingerprints, existingFingerprints, metadataFingerprints };
 }
 
 export interface LibraryChange {
@@ -285,7 +293,7 @@ export async function installLibrarySkills(
   const replaced = inspection.conflicts;
   const metadataOnly = new Set<string>();
   for (const skill of skills.filter((candidate) => unchanged.has(candidate.name))) {
-    if (!(await pathExists(join(metadataDir(), `${skill.name}.json`)))) metadataOnly.add(skill.name);
+    if (!(await entryExists(join(metadataDir(), `${skill.name}.json`)))) metadataOnly.add(skill.name);
   }
     const metadataNames = new Set([...installed, ...metadataOnly]);
     const journal: TransactionJournal = {
@@ -295,7 +303,7 @@ export async function installLibrarySkills(
         name,
         metadataOnly: metadataOnly.has(name),
         hadSkill: await entryExists(join(libraryDir(), name)),
-        hadMetadata: await pathExists(join(metadataDir(), `${name}.json`)),
+        hadMetadata: await entryExists(join(metadataDir(), `${name}.json`)),
       }))),
     };
     for (const entry of journal.entries) {
@@ -394,18 +402,34 @@ export async function installLibrarySkills(
       const record: CommitRecord = { name, skillBackedUp: false, metadataBackedUp: false, skillInstalled: false, metadataInstalled: false };
       committed.push(record);
       const expected = journal.entries.find((entry) => entry.name === name)!;
-      if (await entryExists(destination) !== expected.hadSkill || await pathExists(metadataDestination) !== expected.hadMetadata) {
+      if (await entryExists(destination) !== expected.hadSkill || await entryExists(metadataDestination) !== expected.hadMetadata) {
         throw new SkillenvError(`Library changed concurrently while installing: ${name}`, "LIBRARY_CONFLICT");
       }
       if (!metadataOnly.has(name) && await entryExists(destination)) {
+        const currentFingerprint = await fingerprintEntry(destination);
+        if (currentFingerprint !== inspection.existingFingerprints[name]) {
+          throw new SkillenvError(`Library skill changed while installing: ${name}`, "LIBRARY_CONFLICT_CHANGED");
+        }
         await mkdir(backupSkills, { recursive: true });
-        await rename(destination, join(backupSkills, name));
+        const backup = join(backupSkills, name);
+        await rename(destination, backup);
         record.skillBackedUp = true;
+        if (await fingerprintEntry(backup) !== inspection.existingFingerprints[name]) {
+          throw new SkillenvError(`Library skill changed while installing: ${name}`, "LIBRARY_CONFLICT_CHANGED");
+        }
       }
-      if (await pathExists(metadataDestination)) {
+      if (await entryExists(metadataDestination)) {
+        const currentFingerprint = await fingerprintEntry(metadataDestination);
+        if (currentFingerprint !== inspection.metadataFingerprints[name]) {
+          throw new SkillenvError(`Library metadata changed while installing: ${name}`, "LIBRARY_CONFLICT_CHANGED");
+        }
         await mkdir(backupMetadata, { recursive: true });
-        await rename(metadataDestination, join(backupMetadata, `${name}.json`));
+        const backup = join(backupMetadata, `${name}.json`);
+        await rename(metadataDestination, backup);
         record.metadataBackedUp = true;
+        if (await fingerprintEntry(backup) !== inspection.metadataFingerprints[name]) {
+          throw new SkillenvError(`Library metadata changed while installing: ${name}`, "LIBRARY_CONFLICT_CHANGED");
+        }
       }
       if (!metadataOnly.has(name)) {
         await rename(join(stagedSkills, name), destination);

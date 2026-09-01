@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { SkillenvError } from "./errors.js";
 
@@ -80,6 +80,30 @@ export async function hashDirectory(root: string, options: { ignoreNames?: Reado
   }
 
   await visit(root);
+  return hash.digest("hex");
+}
+
+export async function fingerprintEntry(root: string): Promise<string> {
+  const hash = createHash("sha256");
+  async function visit(path: string, relativePath: string): Promise<void> {
+    const entry = await lstat(path);
+    const mode = entry.mode & 0o777;
+    if (entry.isDirectory()) {
+      hash.update(`d:${relativePath}:${mode}\0`);
+      const children = await readdir(path);
+      children.sort((a, b) => a.localeCompare(b));
+      for (const child of children) await visit(join(path, child), relativePath ? `${relativePath}/${child}` : child);
+    } else if (entry.isFile()) {
+      hash.update(`f:${relativePath}:${mode}\0`);
+      hash.update(await readFile(path));
+      hash.update("\0");
+    } else if (entry.isSymbolicLink()) {
+      hash.update(`l:${relativePath}:${mode}:${await readlink(path)}\0`);
+    } else {
+      hash.update(`s:${relativePath}:${entry.mode}:${entry.rdev}:${entry.size}:${entry.mtimeMs}\0`);
+    }
+  }
+  await visit(root, "");
   return hash.digest("hex");
 }
 

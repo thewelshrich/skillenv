@@ -278,9 +278,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
     return { project, state, previousEnvironment: previous?.environment ?? null };
   } catch (error) {
     const recoveryErrors: unknown[] = [];
-    const structuralRecoveryErrors: unknown[] = [];
     const recordStructuralError = (recoveryError: unknown) => {
-      structuralRecoveryErrors.push(recoveryError);
       recoveryErrors.push(recoveryError);
     };
     for (const entry of [...installed].reverse()) {
@@ -310,7 +308,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
     await updateGitExclude(project, previous?.managed.map((entry) => entry.path) ?? [])
       .catch((recoveryError) => recoveryErrors.push(recoveryError));
     if (recoveryErrors.length) {
-      preserveStaging = structuralRecoveryErrors.length > 0;
+      preserveStaging = true;
       const original = error instanceof Error ? error.message : String(error);
       const recovery = recoveryErrors.map((item) => item instanceof Error ? item.message : String(item)).join("; ");
       throw new SkillenvError(`Activation failed: ${original}. Automatic recovery was incomplete: ${recovery}`, "RECOVERY_REQUIRED");
