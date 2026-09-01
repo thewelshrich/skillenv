@@ -5,6 +5,7 @@ import { SkillenvError } from "./errors.js";
 import { withEnvironmentLock } from "./environments.js";
 import { copySkillDirectory, fingerprintEntry, hashDirectory, inferSkillName, pathExists, readJson, writeJson } from "./fs.js";
 import { environmentsDir, libraryDir, metadataDir, transactionsDir } from "./paths.js";
+import { lockOwnerIsActive, startLockHeartbeat } from "./locks.js";
 import { environmentSchema, nameSchema, type Environment, type SkillMetadata } from "./schema.js";
 import { sanitizeSourceInput } from "./sources.js";
 
@@ -114,31 +115,25 @@ function transactionJournal(value: unknown): TransactionJournal | null {
 }
 
 const locksDir = () => join(transactionsDir(), "locks");
-function processIsRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
 async function acquireLibraryLock(): Promise<() => Promise<void>> {
   await mkdir(locksDir(), { recursive: true });
   const lockName = `install-${process.pid}-${Date.now()}-${randomUUID()}`;
   const ownedLock = join(locksDir(), lockName);
   await mkdir(ownedLock);
+  const stopHeartbeat = await startLockHeartbeat(ownedLock);
   try {
     const contenders = await readdir(locksDir(), { withFileTypes: true });
     let activeContender = false;
     for (const contender of contenders.filter((entry) => entry.isDirectory() && entry.name !== lockName)) {
       const match = /^install-(\d+)-(\d+)-/.exec(contender.name);
       const pid = Number(match?.[1]);
-      if (Number.isInteger(pid) && pid > 0 && processIsRunning(pid)) activeContender = true;
+      const createdAt = Number(match?.[2]);
+      if (await lockOwnerIsActive(join(locksDir(), contender.name), pid, createdAt)) activeContender = true;
       else await rm(join(locksDir(), contender.name), { recursive: true, force: true });
     }
     if (activeContender) throw new SkillenvError("Another skill installation is already updating the library", "LIBRARY_BUSY");
   } catch (error) {
+    stopHeartbeat();
     await rm(ownedLock, { recursive: true, force: true });
     throw error;
   }
@@ -146,6 +141,7 @@ async function acquireLibraryLock(): Promise<() => Promise<void>> {
   return async () => {
     if (released) return;
     released = true;
+    stopHeartbeat();
     await rm(ownedLock, { recursive: true, force: true }).catch(() => {});
   };
 }

@@ -4,20 +4,12 @@ import { join } from "node:path";
 import { SkillenvError } from "./errors.js";
 import { pathExists, readJson, writeJson } from "./fs.js";
 import { requireSkill, withLibraryReadLock } from "./library.js";
+import { lockOwnerIsActive, startLockHeartbeat } from "./locks.js";
 import { environmentsDir, skillenvHome } from "./paths.js";
 import { environmentSchema, nameSchema, type Environment } from "./schema.js";
 
 function environmentPath(name: string): string {
   return join(environmentsDir(), `${name}.json`);
-}
-
-function processIsRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
 }
 
 export async function withEnvironmentLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -26,18 +18,21 @@ export async function withEnvironmentLock<T>(operation: () => Promise<T>): Promi
   const name = `environment-${process.pid}-${Date.now()}-${randomUUID()}`;
   const owned = join(lockRoot, name);
   await mkdir(owned);
+  const stopHeartbeat = await startLockHeartbeat(owned);
   try {
     const contenders = await readdir(lockRoot, { withFileTypes: true });
     let active = false;
     for (const contender of contenders.filter((entry) => entry.isDirectory() && entry.name !== name)) {
       const match = /^environment-(\d+)-(\d+)-/.exec(contender.name);
       const pid = Number(match?.[1]);
-      if (Number.isInteger(pid) && pid > 0 && processIsRunning(pid)) active = true;
+      const createdAt = Number(match?.[2]);
+      if (await lockOwnerIsActive(join(lockRoot, contender.name), pid, createdAt)) active = true;
       else await rm(join(lockRoot, contender.name), { recursive: true, force: true });
     }
     if (active) throw new SkillenvError("Another Skillenv operation is updating environments", "ENVIRONMENT_BUSY");
     return await operation();
   } finally {
+    stopHeartbeat();
     await rm(owned, { recursive: true, force: true }).catch(() => {});
   }
 }

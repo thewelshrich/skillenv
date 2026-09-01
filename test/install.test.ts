@@ -774,11 +774,23 @@ describe("installer", () => {
   it("keeps aged locks owned by a live process", async () => {
     const live = join(home, `transactions/locks/install-${process.pid}-${Date.now() - 31 * 60 * 1000}-live`);
     await mkdir(live, { recursive: true });
+    await writeFile(join(live, ".heartbeat"), `${process.pid}\n`);
     const source = await makeCollection([{ name: "react" }]);
 
     await expect(install({ source, target: { kind: "library" }, yes: true, cwd: project }))
       .rejects.toMatchObject({ code: "LIBRARY_BUSY" });
     expect(await pathExists(live)).toBe(true);
+  });
+
+  it("reclaims aged legacy locks after PID reuse", async () => {
+    const reused = join(home, `transactions/locks/install-${process.pid}-${Date.now() - 31 * 60 * 1000}-reused`);
+    await mkdir(reused, { recursive: true });
+    const source = await makeCollection([{ name: "react" }]);
+
+    const result = await install({ source, target: { kind: "library" }, yes: true, cwd: project });
+
+    expect(result.status).toBe("installed");
+    expect(await pathExists(reused)).toBe(false);
   });
 
   it("reclaims locks owned by a dead process", async () => {

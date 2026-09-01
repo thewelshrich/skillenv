@@ -8,6 +8,7 @@ import { SkillenvError } from "./errors.js";
 import { copyDirectory, hashDirectory, pathExists, readJson, removeEmptyParents, writeJson } from "./fs.js";
 import { findProject, updateGitExclude, type Project } from "./git.js";
 import { requireSkill, withLibraryReadLock } from "./library.js";
+import { lockOwnerIsActive, startLockHeartbeat } from "./locks.js";
 import { nameSchema, projectStateSchema, type Environment, type ProjectState } from "./schema.js";
 
 function statePath(root: string): string {
@@ -128,16 +129,20 @@ async function acquireProjectLock(root: string): Promise<() => Promise<void>> {
   const name = `activation-${process.pid}-${Date.now()}-${randomUUID()}`;
   const owned = join(lockRoot, name);
   await mkdir(owned);
+  const stopHeartbeat = await startLockHeartbeat(owned);
   try {
     const contenders = await readdir(lockRoot, { withFileTypes: true });
     let active = false;
     for (const contender of contenders.filter((entry) => entry.isDirectory() && entry.name !== name)) {
       const match = /^activation-(\d+)-(\d+)-/.exec(contender.name);
       const pid = Number(match?.[1]);
+      const createdAt = Number(match?.[2]);
       try {
-        if (Number.isInteger(pid) && pid > 0) process.kill(pid, 0);
+        if (await lockOwnerIsActive(join(lockRoot, contender.name), pid, createdAt)) {
+          active = true;
+          continue;
+        }
         else throw Object.assign(new Error(), { code: "ESRCH" });
-        active = true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ESRCH") await rm(join(lockRoot, contender.name), { recursive: true, force: true });
         else active = true;
@@ -145,10 +150,12 @@ async function acquireProjectLock(root: string): Promise<() => Promise<void>> {
     }
     if (active) throw new SkillenvError("Another Skillenv operation is updating this project", "PROJECT_BUSY");
   } catch (error) {
+    stopHeartbeat();
     await rm(owned, { recursive: true, force: true });
     throw error;
   }
   return async () => {
+    stopHeartbeat();
     await rm(owned, { recursive: true, force: true }).catch(() => {});
     await removeEmptyParents(lockRoot, root).catch(() => {});
   };
@@ -193,7 +200,7 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
         const backup = join(root, "backup", previous.path);
         if (await pathExists(backup)) {
           const destination = await checkedManagedPath(project.root, previous.path, previous.skill);
-          if (await pathExists(destination)) throw new SkillenvError(`Interrupted activation path was recreated: ${previous.path}`, "RECOVERY_REQUIRED");
+          if (await entryExists(destination)) throw new SkillenvError(`Interrupted activation path was recreated: ${previous.path}`, "RECOVERY_REQUIRED");
           await mkdir(dirname(destination), { recursive: true });
           await rename(backup, destination);
         }

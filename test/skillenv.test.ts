@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, cp, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -184,6 +184,29 @@ describe("skillenv", () => {
 
     await expect(getStatus(project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     expect(await readFile(join(externalSkill, "SKILL.md"), "utf8")).toBe("external\n");
+  });
+
+  it("preserves dangling destinations recreated before activation recovery", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    await activate("frontend", project);
+    const previous = JSON.parse(await readFile(join(project, ".skillenv/state.json"), "utf8"));
+    const managed = previous.managed.find((entry: { path: string }) => entry.path === ".agents/skills/react");
+    const transaction = join(project, ".skillenv/staging-interrupted");
+    await mkdir(join(transaction, "backup/.agents/skills"), { recursive: true });
+    await rename(join(project, managed.path), join(transaction, "backup", managed.path));
+    await mkdir(join(transaction, "next", managed.path), { recursive: true });
+    await symlink(join(sandbox, "missing-target"), join(project, managed.path));
+    await writeFile(join(transaction, "journal.json"), `${JSON.stringify({
+      version: 1,
+      hashVersion: 2,
+      phase: "prepared",
+      previous,
+      planned: [managed],
+    })}\n`);
+
+    await expect(getStatus(project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect((await lstat(join(project, managed.path))).isSymbolicLink()).toBe(true);
   });
 
   it("refuses symlinked project metadata roots without deleting external transactions", async () => {
