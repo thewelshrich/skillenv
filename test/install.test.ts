@@ -97,6 +97,19 @@ describe("installer", () => {
       .rejects.toMatchObject({ code: "INPUT_REQUIRED" });
   });
 
+  it("emits machine-readable errors in JSON mode", async () => {
+    const failure = await execFileAsync(process.execPath, ["--import", "tsx", "src/cli.ts", "add", "--json", "--library-only"], {
+      cwd: process.cwd(),
+      env: { ...process.env, SKILLENV_HOME: home },
+    }).catch((error: unknown) => error as { stdout: string; code: number });
+
+    expect("code" in failure ? failure.code : 0).toBe(1);
+    expect(JSON.parse(failure.stdout)).toEqual({
+      status: "error",
+      error: { code: "INPUT_REQUIRED", message: "A source is required" },
+    });
+  });
+
   it("rejects explicitly empty Git refs", async () => {
     await expect(resolveSource("owner/repo#")).rejects.toMatchObject({ code: "INVALID_INPUT" });
   });
@@ -722,6 +735,26 @@ describe("installer", () => {
     expect(JSON.parse(await readFile(join(home, "environments/frontend.json"), "utf8"))).toEqual(previousEnvironment);
     expect(await pathExists(join(home, "skills/playwright/SKILL.md"))).toBe(true);
     expect(await pathExists(interrupted)).toBe(false);
+  });
+
+  it("recovers dangling symlink library backups without following them", async () => {
+    const interrupted = join(home, "transactions/interrupted-symlink");
+    const destination = join(home, "skills/react");
+    await mkdir(destination, { recursive: true });
+    await writeFile(join(destination, "SKILL.md"), "replacement\n");
+    const installedHash = await hashDirectory(destination, { includeModes: true });
+    await mkdir(join(interrupted, "backup/skills"), { recursive: true });
+    await symlink("missing-target", join(interrupted, "backup/skills/react"));
+    await writeFile(join(interrupted, "journal.json"), `${JSON.stringify({
+      version: 1,
+      phase: "prepared",
+      entries: [{ name: "react", metadataOnly: false, hadSkill: true, hadMetadata: false, installedHash }],
+    })}\n`);
+
+    await install({ source: await makeCollection([{ name: "playwright" }]), target: { kind: "library" }, yes: true, cwd: project });
+
+    expect((await lstat(destination)).isSymbolicLink()).toBe(true);
+    expect(await pathExists(join(home, "skills/playwright/SKILL.md"))).toBe(true);
   });
 
   it("preserves edits to a skill from an interrupted library install", async () => {

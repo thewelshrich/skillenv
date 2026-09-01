@@ -26,6 +26,7 @@ export function registerAddCommands(program: Command): void {
     .option("--dry-run", "show the installation plan without writing")
     .option("--json", "print machine-readable output; implies --yes")
     .action(async (source, options, command) => {
+      try {
       if (options.all && options.skill.length) throw new SkillenvError("--skill and --all are mutually exclusive", "INVALID_INPUT");
       const targets = [options.env, options.createEnv, options.libraryOnly].filter(Boolean);
       if (targets.length > 1) throw new SkillenvError("--env, --create-env, and --library-only are mutually exclusive", "INVALID_INPUT");
@@ -58,6 +59,18 @@ export function registerAddCommands(program: Command): void {
         console.log(`${pc.green("Installed")} ${result.plan.skills.join(", ")}`);
         if (result.plan.target.kind === "environment") console.log(`${result.plan.target.create ? "Created" : "Updated"} environment ${result.plan.target.name}`);
         if (result.plan.activate && result.plan.projectRoot) console.log(`Activated in ${result.plan.projectRoot}`);
+      }
+      } catch (error) {
+        if (!options.json) throw error;
+        const value = error as { code?: unknown; message?: unknown };
+        console.log(JSON.stringify({
+          status: "error",
+          error: {
+            code: typeof value.code === "string" ? value.code : "SKILLENV_ERROR",
+            message: typeof value.message === "string" ? value.message : "Unknown error",
+          },
+        }, null, 2));
+        process.exitCode = 1;
       }
     });
 

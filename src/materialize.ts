@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { ZodError } from "zod";
@@ -10,9 +10,28 @@ import { findProject, updateGitExclude, type Project } from "./git.js";
 import { requireSkill, withLibraryReadLock } from "./library.js";
 import { lockOwnerIsActive, startLockHeartbeat } from "./locks.js";
 import { nameSchema, projectStateSchema, type Environment, type ProjectState } from "./schema.js";
+import { skillenvHome } from "./paths.js";
 
 function statePath(root: string): string {
   return join(root, ".skillenv", "state.json");
+}
+
+function projectTransactionMarker(projectRoot: string, transactionName: string): string {
+  const key = createHash("sha256").update(`${resolve(projectRoot)}\0${transactionName}`).digest("hex");
+  return join(skillenvHome(), "project-transactions", key);
+}
+
+async function hasProjectTransactionMarker(path: string): Promise<boolean> {
+  const marker = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  return Boolean(marker?.isFile() && !marker.isSymbolicLink());
+}
+
+async function removeProjectTransactionMarker(path: string): Promise<void> {
+  await rm(path, { force: true });
+  await removeEmptyParents(dirname(path), skillenvHome()).catch(() => {});
 }
 
 async function assertProjectMetadataRoot(root: string): Promise<void> {
@@ -170,9 +189,14 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
   });
   for (const entry of entries.filter((candidate) => candidate.isDirectory() && candidate.name.startsWith("staging-"))) {
     const root = join(skillenvRoot, entry.name);
+    const marker = projectTransactionMarker(project.root, entry.name);
+    if (!(await hasProjectTransactionMarker(marker))) {
+      throw new SkillenvError(`Refusing untrusted activation recovery metadata: ${root}`, "RECOVERY_REQUIRED");
+    }
     const journalPath = join(root, "journal.json");
     if (!(await pathExists(journalPath))) {
       await rm(root, { recursive: true, force: true });
+      await removeProjectTransactionMarker(marker);
       continue;
     }
     const journal = parseActivationJournal(await readJson(journalPath));
@@ -209,6 +233,7 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
       await updateGitExclude(project, journal.previous?.managed.map((item) => item.path) ?? []);
     }
     await rm(root, { recursive: true, force: true });
+    await removeProjectTransactionMarker(marker);
   }
 }
 
@@ -260,6 +285,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
   }
 
   const stagingRoot = join(project.root, ".skillenv", `staging-${randomUUID()}`);
+  const transactionMarker = projectTransactionMarker(project.root, stagingRoot.slice(stagingRoot.lastIndexOf(sep) + 1));
   const backupRoot = join(stagingRoot, "backup");
   const journalPath = join(stagingRoot, "journal.json");
   const staged: Array<{ skill: string; path: string; stagedPath: string; hash: string }> = [];
@@ -268,6 +294,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
   const journal: ActivationJournal = { version: 1, hashVersion: 2, phase: "prepared", previous, planned: [] };
   let preserveStaging = false;
   try {
+    await writeJson(transactionMarker, { version: 1 });
     for (const entry of planned) {
       const source = await requireSkill(entry.skill);
       const sourceHash = await hashDirectory(source, { includeModes: true });
@@ -359,7 +386,10 @@ async function activateLocked(environment: Environment, project: Project): Promi
     }
     throw error;
   } finally {
-    if (!preserveStaging) await rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
+    if (!preserveStaging) {
+      await rm(stagingRoot, { recursive: true, force: true }).catch(() => {});
+      await removeProjectTransactionMarker(transactionMarker).catch(() => {});
+    }
   }
 }
 

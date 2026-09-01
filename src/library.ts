@@ -187,7 +187,7 @@ async function recoverLibraryTransactions(): Promise<void> {
         const skillBackup = join(backupSkills, item.name);
         const metadataBackup = join(backupMetadata, `${item.name}.json`);
         if (!item.metadataOnly) {
-          const backupExists = await pathExists(skillBackup);
+          const backupExists = await entryExists(skillBackup);
           const stagedExists = await entryExists(join(root, "staged", "skills", item.name));
           if (await entryExists(destination) && stagedExists && (backupExists || !item.hadSkill)) {
             throw new SkillenvError(`Interrupted library destination was recreated: ${item.name}`, "RECOVERY_REQUIRED");

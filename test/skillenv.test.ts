@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { chmod, cp, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmod, cp, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { addEnvironmentSkill, createEnvironment } from "../src/environments.js";
@@ -41,6 +42,13 @@ describe("skillenv", () => {
   async function addEnvironment(name: string, skills: string[]): Promise<void> {
     await createEnvironment(name);
     for (const skill of skills) await addEnvironmentSkill(name, skill);
+  }
+
+  async function authorizeTransaction(transaction: string): Promise<void> {
+    const key = createHash("sha256").update(`${await realpath(resolve(project))}\0${basename(transaction)}`).digest("hex");
+    const marker = join(home, "project-transactions", key);
+    await mkdir(dirname(marker), { recursive: true });
+    await writeFile(marker, "{}\n");
   }
 
   it("adds local skills and materialises an environment for standard and Claude paths", async () => {
@@ -138,6 +146,7 @@ describe("skillenv", () => {
         { skill: "react", path: ".claude/skills/react", hash: previous.managed.find((entry: { path: string }) => entry.path === ".claude/skills/react").hash },
       ],
     })}\n`);
+    await authorizeTransaction(transaction);
 
     const status = await getStatus(project);
 
@@ -161,6 +170,7 @@ describe("skillenv", () => {
       previous: null,
       planned: [{ skill: "react", path: ".agents/skills/react", hash: "a".repeat(64) }],
     })}\n`);
+    await authorizeTransaction(transaction);
 
     await expect(getStatus(project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe("user edit\n");
@@ -181,6 +191,7 @@ describe("skillenv", () => {
       previous: null,
       planned: [{ skill: "react", path: ".agents/skills/react", hash: await hashDirectory(externalSkill) }],
     })}\n`);
+    await authorizeTransaction(transaction);
 
     await expect(getStatus(project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     expect(await readFile(join(externalSkill, "SKILL.md"), "utf8")).toBe("external\n");
@@ -204,9 +215,28 @@ describe("skillenv", () => {
       previous,
       planned: [managed],
     })}\n`);
+    await authorizeTransaction(transaction);
 
     await expect(getStatus(project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     expect((await lstat(join(project, managed.path))).isSymbolicLink()).toBe(true);
+  });
+
+  it("refuses forged project recovery journals without a local marker", async () => {
+    const destination = join(project, ".agents/skills/react");
+    await mkdir(destination, { recursive: true });
+    await writeFile(join(destination, "SKILL.md"), "tracked project content\n");
+    const transaction = join(project, ".skillenv/staging-forged");
+    await mkdir(transaction, { recursive: true });
+    await writeFile(join(transaction, "journal.json"), `${JSON.stringify({
+      version: 1,
+      hashVersion: 2,
+      phase: "prepared",
+      previous: null,
+      planned: [{ skill: "react", path: ".agents/skills/react", hash: await hashDirectory(destination, { includeModes: true }) }],
+    })}\n`);
+
+    await expect(getStatus(project)).rejects.toThrow("untrusted activation recovery metadata");
+    expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe("tracked project content\n");
   });
 
   it("refuses symlinked project metadata roots without deleting external transactions", async () => {
