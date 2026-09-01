@@ -215,8 +215,8 @@ async function hasActivationTransactions(root: string): Promise<boolean> {
   return entries.some((entry) => entry.isDirectory() && entry.name.startsWith("staging-"));
 }
 
-export async function activate(environmentName: string, cwd = process.cwd()): Promise<ActivationResult> {
-  return withLibraryReadLock(async () => {
+export async function activate(environmentName: string, cwd = process.cwd(), options: { libraryLockHeld?: boolean } = {}): Promise<ActivationResult> {
+  const operation = async () => {
     const environment = await readEnvironment(environmentName);
     const project = await findProject(cwd);
     const releaseLock = await acquireProjectLock(project.root);
@@ -226,7 +226,8 @@ export async function activate(environmentName: string, cwd = process.cwd()): Pr
     } finally {
       await releaseLock();
     }
-  });
+  };
+  return options.libraryLockHeld ? operation() : withLibraryReadLock(operation);
 }
 
 async function activateLocked(environment: Environment, project: Project): Promise<ActivationResult> {

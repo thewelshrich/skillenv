@@ -304,7 +304,8 @@ export interface LibraryChange {
   unchanged: string[];
   recordEnvironment(previous: Environment | null, next: Environment): Promise<void>;
   rollback(): Promise<void>;
-  finalize(): Promise<void>;
+  finalize(options?: { keepLock?: boolean }): Promise<void>;
+  release(): Promise<void>;
 }
 
 export async function installLibrarySkills(
@@ -433,12 +434,20 @@ export async function installLibrarySkills(
           }
         }
         if (record.skillBackedUp) {
+          const destination = join(libraryDir(), name);
+          if (await entryExists(destination)) {
+            throw new SkillenvError(`Library destination was recreated during rollback: ${name}`, "RECOVERY_REQUIRED");
+          }
           await mkdir(libraryDir(), { recursive: true });
-          await rename(join(backupSkills, name), join(libraryDir(), name));
+          await rename(join(backupSkills, name), destination);
         }
         if (record.metadataBackedUp) {
+          const metadataDestination = join(metadataDir(), `${name}.json`);
+          if (await entryExists(metadataDestination)) {
+            throw new SkillenvError(`Library metadata destination was recreated during rollback: ${name}`, "RECOVERY_REQUIRED");
+          }
           await mkdir(metadataDir(), { recursive: true });
-          await rename(join(backupMetadata, `${name}.json`), join(metadataDir(), `${name}.json`));
+          await rename(join(backupMetadata, `${name}.json`), metadataDestination);
         }
       }
       await rm(transactionRoot, { recursive: true, force: true });
@@ -492,6 +501,7 @@ export async function installLibrarySkills(
         await rename(join(stagedSkills, name), destination);
         record.skillInstalled = true;
       }
+      if (await entryExists(metadataDestination)) throw new SkillenvError(`Library metadata destination was recreated while installing: ${name}`, "LIBRARY_CONFLICT_CHANGED");
       await rename(join(stagedMetadata, `${name}.json`), metadataDestination);
       record.metadataInstalled = true;
     }
@@ -509,7 +519,7 @@ export async function installLibrarySkills(
         await writeJson(join(transactionRoot, "journal.json"), journal);
       },
       rollback,
-      finalize: async () => {
+      finalize: async (finalizeOptions = {}) => {
         try {
           journal.phase = "committed";
           await writeJson(join(transactionRoot, "journal.json"), journal).catch(async () => {
@@ -517,9 +527,10 @@ export async function installLibrarySkills(
           });
           await rm(transactionRoot, { recursive: true, force: true }).catch(() => {});
         } finally {
-          await releaseLock();
+          if (!finalizeOptions.keepLock) await releaseLock();
         }
       },
+      release: releaseLock,
     };
   } catch (error) {
     await releaseLock();

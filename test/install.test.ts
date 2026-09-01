@@ -572,6 +572,64 @@ describe("installer", () => {
     expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toBe("unmanaged\n");
   });
 
+  it("preserves metadata destinations created while staging", async () => {
+    const resolved = await resolveSource(await makeCollection([{ name: "react" }]));
+    const createDuringStaging = (async () => {
+      for (let attempt = 0; attempt < 5000; attempt += 1) {
+        const transactions = await readdir(join(home, "transactions"), { withFileTypes: true }).catch(() => []);
+        const staging = transactions.find((entry) => entry.isDirectory() && entry.name !== "locks");
+        if (staging && await pathExists(join(home, "transactions", staging.name, "staged/metadata/react.json"))) {
+          await mkdir(join(home, "metadata"), { recursive: true });
+          await writeFile(join(home, "metadata/react.json"), "unmanaged metadata\n");
+          return;
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      throw new Error("Installation did not enter staging");
+    })();
+
+    await expect(installLibrarySkills(resolved.skills, { input: resolved.input, kind: resolved.kind, revision: null }, { replace: false }))
+      .rejects.toMatchObject({ code: "LIBRARY_CONFLICT_CHANGED" });
+    await createDuringStaging;
+    expect(await readFile(join(home, "metadata/react.json"), "utf8")).toBe("unmanaged metadata\n");
+  });
+
+  it("holds the library lock through requested activation", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    for (let index = 0; index < 100; index += 1) {
+      await writeFile(join(source, "skills/react", `file-${index}.txt`), `${index}\n`);
+    }
+    const competitor = await resolveSource(await makeCollection([{ name: "playwright" }]));
+    const concurrentAttempt = (async () => {
+      for (let attempt = 0; attempt < 100000; attempt += 1) {
+        const entries = await readdir(join(project, ".skillenv"), { withFileTypes: true }).catch(() => []);
+        if (entries.some((entry) => entry.isDirectory() && entry.name.startsWith("staging-"))) {
+          try {
+            const change = await installLibrarySkills(competitor.skills, { input: competitor.input, kind: competitor.kind, revision: null }, { replace: false });
+            await change.rollback();
+            return "acquired";
+          } catch (error) {
+            return (error as { code?: string }).code;
+          }
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      return "missing-staging";
+    })();
+
+    const result = await install({
+      source,
+      target: { kind: "environment", name: "frontend", create: true },
+      activate: true,
+      yes: true,
+      cwd: project,
+    });
+
+    expect(result.status).toBe("installed");
+    expect(await concurrentAttempt).toBe("LIBRARY_BUSY");
+    await competitor.cleanup();
+  });
+
   it("recovers an interrupted library transaction before installing", async () => {
     const interrupted = join(home, "transactions/interrupted");
     await mkdir(join(home, "skills/react"), { recursive: true });

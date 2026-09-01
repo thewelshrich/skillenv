@@ -139,9 +139,18 @@ export async function install(request: InstallRequest, interaction?: InstallInte
           beforeWrite: (previous, next) => libraryChange!.recordEnvironment(previous, next),
         });
       }
-      await libraryChange.finalize();
-      transactionFinalized = true;
-      if (target.kind === "environment" && shouldActivate) await activate(target.name, cwd);
+      if (target.kind === "environment" && shouldActivate) {
+        await libraryChange.finalize({ keepLock: true });
+        transactionFinalized = true;
+        try {
+          await activate(target.name, cwd, { libraryLockHeld: true });
+        } finally {
+          await libraryChange.release();
+        }
+      } else {
+        await libraryChange.finalize();
+        transactionFinalized = true;
+      }
     } catch (error) {
       const recoveryErrors: unknown[] = [];
       if (!transactionFinalized) {
