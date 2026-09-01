@@ -12,3 +12,11 @@ export function libraryDir(): string {
 export function environmentsDir(): string {
   return join(skillenvHome(), "environments");
 }
+
+export function metadataDir(): string {
+  return join(skillenvHome(), "metadata");
+}
+
+export function transactionsDir(): string {
+  return join(skillenvHome(), "transactions");
+}

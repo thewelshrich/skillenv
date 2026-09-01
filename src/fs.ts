@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
-import { cp, mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { SkillenvError } from "./errors.js";
 
 export async function pathExists(path: string): Promise<boolean> {
@@ -24,7 +24,13 @@ export async function readJson(path: string): Promise<unknown> {
 
 export async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+  const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {});
+  }
 }
 
 export async function copyDirectory(source: string, destination: string): Promise<void> {
@@ -32,18 +38,34 @@ export async function copyDirectory(source: string, destination: string): Promis
   await cp(source, destination, { recursive: true, errorOnExist: true, force: false });
 }
 
-export async function hashDirectory(root: string): Promise<string> {
+export async function copySkillDirectory(source: string, destination: string): Promise<void> {
+  await mkdir(dirname(destination), { recursive: true });
+  await cp(source, destination, {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+    filter: (path) => !relative(source, path).split(sep).includes(".git"),
+  });
+}
+
+export async function hashDirectory(root: string, options: { ignoreNames?: ReadonlySet<string>; includeModes?: boolean } = {}): Promise<string> {
+  const rootStat = await lstat(root);
+  if (rootStat.isSymbolicLink()) throw new SkillenvError("Symbolic links are not supported as skill roots");
+  if (!rootStat.isDirectory()) throw new SkillenvError("Skill roots must be directories");
   const hash = createHash("sha256");
+  if (options.includeModes) hash.update(`m:${rootStat.mode & 0o777}\0`);
 
   async function visit(directory: string, prefix = ""): Promise<void> {
     const entries = await readdir(directory, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+      if (options.ignoreNames?.has(entry.name)) continue;
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
       const absolute = join(directory, entry.name);
       if (entry.isSymbolicLink()) {
         throw new SkillenvError(`Symbolic links are not supported in skills: ${relative}`);
       }
+      if (options.includeModes) hash.update(`m:${(await lstat(absolute)).mode & 0o777}\0`);
       if (entry.isDirectory()) {
         hash.update(`d:${relative}\0`);
         await visit(absolute, relative);
@@ -51,11 +73,37 @@ export async function hashDirectory(root: string): Promise<string> {
         hash.update(`f:${relative}\0`);
         hash.update(await readFile(absolute));
         hash.update("\0");
+      } else {
+        throw new SkillenvError(`Unsupported filesystem entry in skill: ${relative}`);
       }
     }
   }
 
   await visit(root);
+  return hash.digest("hex");
+}
+
+export async function fingerprintEntry(root: string): Promise<string> {
+  const hash = createHash("sha256");
+  async function visit(path: string, relativePath: string): Promise<void> {
+    const entry = await lstat(path);
+    const mode = entry.mode & 0o777;
+    if (entry.isDirectory()) {
+      hash.update(`d:${relativePath}:${mode}\0`);
+      const children = await readdir(path);
+      children.sort((a, b) => a.localeCompare(b));
+      for (const child of children) await visit(join(path, child), relativePath ? `${relativePath}/${child}` : child);
+    } else if (entry.isFile()) {
+      hash.update(`f:${relativePath}:${mode}\0`);
+      hash.update(await readFile(path));
+      hash.update("\0");
+    } else if (entry.isSymbolicLink()) {
+      hash.update(`l:${relativePath}:${mode}:${await readlink(path)}\0`);
+    } else {
+      hash.update(`s:${relativePath}:${entry.mode}:${entry.rdev}:${entry.size}:${entry.mtimeMs}\0`);
+    }
+  }
+  await visit(root, "");
   return hash.digest("hex");
 }
 

@@ -22,9 +22,24 @@ export const managedEntrySchema = z.object({
 
 export const projectStateSchema = z.object({
   version: z.literal(1),
+  hashVersion: z.literal(2).optional(),
   environment: nameSchema,
   activatedAt: z.string(),
   managed: z.array(managedEntrySchema),
 });
 
 export type ProjectState = z.infer<typeof projectStateSchema>;
+
+export const skillMetadataSchema = z.object({
+  version: z.literal(1),
+  name: nameSchema,
+  description: z.string(),
+  source: z.string().min(1),
+  sourceKind: z.enum(["local", "git"]),
+  sourcePath: z.string(),
+  revision: z.string().nullable(),
+  hash: z.string().regex(/^[a-f0-9]{64}$/),
+  installedAt: z.string(),
+});
+
+export type SkillMetadata = z.infer<typeof skillMetadataSchema>;
