@@ -85,6 +85,13 @@ describe("installer", () => {
   it("redacts credentials from persisted source provenance", () => {
     expect(sanitizeSourceInput("https://token:secret@example.com/owner/repo.git#main"))
       .toBe("https://example.com/owner/repo.git#main");
+    expect(sanitizeSourceInput("ssh://user:secret@example.com/owner/repo.git"))
+      .toBe("ssh://example.com/owner/repo.git");
+  });
+
+  it("rejects empty source input", async () => {
+    await expect(install({ source: "   ", target: { kind: "library" }, dryRun: true, cwd: project }))
+      .rejects.toMatchObject({ code: "INPUT_REQUIRED" });
   });
 
   it("creates an environment and activates it in the current project", async () => {
@@ -216,6 +223,24 @@ describe("installer", () => {
     expect(await pathExists(home)).toBe(false);
   });
 
+  it("does not recover interrupted activation state during a dry run", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    await install({ source, target: { kind: "environment", name: "frontend", create: true }, yes: true, cwd: project });
+    const interrupted = join(project, ".skillenv/staging-interrupted");
+    await mkdir(interrupted, { recursive: true });
+
+    const result = await install({
+      source,
+      target: { kind: "environment", name: "frontend", create: false },
+      activate: true,
+      dryRun: true,
+      cwd: project,
+    });
+
+    expect(result.status).toBe("planned");
+    expect(await pathExists(interrupted)).toBe(true);
+  });
+
   it("renders a dry-run preview in interactive mode", async () => {
     const source = await makeCollection([{ name: "react" }]);
     const interaction = new ScriptedInteraction({ target: { kind: "library" } });
@@ -344,6 +369,30 @@ describe("installer", () => {
     await writeFile(parent, "not a directory\n");
 
     await expect(resolveSource(join(parent, "react"))).rejects.toMatchObject({ code: "ENOTDIR" });
+  });
+
+  it("rejects existing non-directory sources before remote fallback", async () => {
+    const source = join(sandbox, "owner/repo");
+    await mkdir(join(sandbox, "owner"), { recursive: true });
+    await writeFile(source, "not a repository\n");
+
+    await expect(resolveSource(source)).rejects.toMatchObject({ code: "SOURCE_UNSUPPORTED" });
+  });
+
+  it("names an unnamed remote root skill after its repository", async () => {
+    const repository = join(sandbox, "delightful-skill");
+    await mkdir(repository, { recursive: true });
+    await writeFile(join(repository, "SKILL.md"), "# Delightful\n");
+    await execFileAsync("git", ["init", "-q", repository]);
+    await execFileAsync("git", ["-C", repository, "add", "SKILL.md"]);
+    await execFileAsync("git", ["-C", repository, "-c", "user.name=Skillenv Tests", "-c", "user.email=tests@skillenv.dev", "commit", "-qm", "fixture"]);
+
+    const resolved = await resolveSource(`file://${repository}`);
+    try {
+      expect(resolved.skills.map((skill) => skill.name)).toEqual(["delightful-skill"]);
+    } finally {
+      await resolved.cleanup();
+    }
   });
 
   it("treats executable mode changes as library conflicts", async () => {

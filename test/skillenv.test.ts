@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { addEnvironmentSkill, createEnvironment } from "../src/environments.js";
-import { pathExists } from "../src/fs.js";
+import { hashDirectory, pathExists } from "../src/fs.js";
 import { addSkill, listSkills } from "../src/library.js";
 import { activate, deactivate, getStatus } from "../src/materialize.js";
 
@@ -150,6 +150,26 @@ describe("skillenv", () => {
 
     await expect(getStatus(project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
     expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe("user edit\n");
+  });
+
+  it("refuses recovery through symlinked managed-path ancestors", async () => {
+    const outside = join(sandbox, "outside");
+    const externalSkill = join(outside, "react");
+    await mkdir(externalSkill, { recursive: true });
+    await writeFile(join(externalSkill, "SKILL.md"), "external\n");
+    await mkdir(join(project, ".agents"), { recursive: true });
+    await symlink(outside, join(project, ".agents/skills"));
+    const transaction = join(project, ".skillenv/staging-interrupted");
+    await mkdir(transaction, { recursive: true });
+    await writeFile(join(transaction, "journal.json"), `${JSON.stringify({
+      version: 1,
+      phase: "prepared",
+      previous: null,
+      planned: [{ skill: "react", path: ".agents/skills/react", hash: await hashDirectory(externalSkill) }],
+    })}\n`);
+
+    await expect(getStatus(project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(await readFile(join(externalSkill, "SKILL.md"), "utf8")).toBe("external\n");
   });
 
   it("reads inactive status without creating project state", async () => {

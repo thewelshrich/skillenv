@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, rename, rm } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { lstat, mkdir, readdir, rename, rm } from "node:fs/promises";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { ZodError } from "zod";
 import { adapters, adapterSkillPath, isAdapterSkillPath } from "./adapters.js";
 import { readEnvironment } from "./environments.js";
@@ -23,6 +23,30 @@ function resolveManagedPath(root: string, path: string, skill: string): string {
   return absolute;
 }
 
+async function assertManagedAncestors(root: string, absolute: string): Promise<void> {
+  const projectRoot = resolve(root);
+  const parent = dirname(absolute);
+  const segments = relative(projectRoot, parent).split(sep).filter(Boolean);
+  let current = projectRoot;
+  for (const segment of segments) {
+    current = join(current, segment);
+    const entry = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!entry) return;
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      throw new SkillenvError(`Refusing managed path through unsafe project entry: ${relative(projectRoot, current)}`, "RECOVERY_REQUIRED");
+    }
+  }
+}
+
+async function checkedManagedPath(root: string, path: string, skill: string): Promise<string> {
+  const absolute = resolveManagedPath(root, path, skill);
+  await assertManagedAncestors(root, absolute);
+  return absolute;
+}
+
 export async function readProjectState(root: string): Promise<ProjectState | null> {
   const path = statePath(root);
   if (!(await pathExists(path))) return null;
@@ -37,7 +61,7 @@ export async function readProjectState(root: string): Promise<ProjectState | nul
 async function assertOwnedFilesUnchanged(root: string, state: ProjectState | null): Promise<void> {
   if (!state) return;
   for (const entry of state.managed) {
-    const absolute = resolveManagedPath(root, entry.path, entry.skill);
+    const absolute = await checkedManagedPath(root, entry.path, entry.skill);
     if (!(await pathExists(absolute))) throw new SkillenvError(`Managed skill is missing: ${entry.path}. Restore it or remove .skillenv/state.json deliberately.`);
     const currentHash = await hashDirectory(absolute);
     if (currentHash !== entry.hash) {
@@ -128,7 +152,7 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
     if (journal.phase === "prepared") {
       for (const planned of journal.planned) {
         if (!(await pathExists(join(root, "next", planned.path)))) {
-          const destination = resolveManagedPath(project.root, planned.path, planned.skill);
+          const destination = await checkedManagedPath(project.root, planned.path, planned.skill);
           if (await pathExists(destination)) {
             const currentHash = await hashDirectory(destination);
             const previous = journal.previous?.managed.find((item) => item.path === planned.path);
@@ -146,7 +170,7 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
       for (const previous of journal.previous?.managed ?? []) {
         const backup = join(root, "backup", previous.path);
         if (await pathExists(backup)) {
-          const destination = resolveManagedPath(project.root, previous.path, previous.skill);
+          const destination = await checkedManagedPath(project.root, previous.path, previous.skill);
           if (await pathExists(destination)) throw new SkillenvError(`Interrupted activation path was recreated: ${previous.path}`, "RECOVERY_REQUIRED");
           await mkdir(dirname(destination), { recursive: true });
           await rename(backup, destination);
@@ -274,9 +298,9 @@ export interface StatusResult {
   drifted: string[];
 }
 
-export async function getStatus(cwd = process.cwd()): Promise<StatusResult> {
+export async function getStatus(cwd = process.cwd(), options: { recover?: boolean } = {}): Promise<StatusResult> {
   const project = await findProject(cwd);
-  if (await hasActivationTransactions(project.root)) {
+  if (options.recover !== false && await hasActivationTransactions(project.root)) {
     const releaseLock = await acquireProjectLock(project.root);
     try {
       await recoverActivationTransactions(project);
@@ -287,7 +311,7 @@ export async function getStatus(cwd = process.cwd()): Promise<StatusResult> {
   const state = await readProjectState(project.root);
   const drifted: string[] = [];
   for (const entry of state?.managed ?? []) {
-    const absolute = resolveManagedPath(project.root, entry.path, entry.skill);
+    const absolute = await checkedManagedPath(project.root, entry.path, entry.skill);
     if (!(await pathExists(absolute)) || (await hashDirectory(absolute)) !== entry.hash) drifted.push(entry.path);
   }
   return { project, state, drifted };
@@ -305,7 +329,7 @@ export async function deactivate(cwd = process.cwd()): Promise<{ project: Projec
     }
     await assertOwnedFilesUnchanged(project.root, state);
     for (const entry of state.managed) {
-      const absolute = resolveManagedPath(project.root, entry.path, entry.skill);
+      const absolute = await checkedManagedPath(project.root, entry.path, entry.skill);
       await rm(absolute, { recursive: true });
       await removeEmptyParents(dirname(absolute), project.root);
     }

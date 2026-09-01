@@ -68,6 +68,7 @@ export async function install(request: InstallRequest, interaction?: InstallInte
   try {
     interaction?.intro();
     const sourceInput = (request.source ?? (interaction ? await interaction.source() : requireInput("A source is required"))).trim();
+    if (!sourceInput) requireInput("A source is required");
     source = interaction
       ? await interaction.task("Resolving source…", () => resolveSource(sourceInput))
       : await resolveSource(sourceInput);
@@ -89,7 +90,7 @@ export async function install(request: InstallRequest, interaction?: InstallInte
     let target = request.target;
     if (!target) {
       if (!interaction) requireInput("Choose --env <name>, --create-env <name>, or --library-only");
-      status = await getStatus(cwd);
+      status = await getStatus(cwd, { recover: !request.dryRun });
       target = await interaction.target(environments, status.state?.environment ?? null);
     }
     if (target.kind === "environment") {
@@ -103,11 +104,11 @@ export async function install(request: InstallRequest, interaction?: InstallInte
 
     let shouldActivate = request.activate ?? false;
     if (target.kind === "environment" && request.activate === undefined && interaction) {
-      status ??= await getStatus(cwd);
+      status ??= await getStatus(cwd, { recover: !request.dryRun });
       shouldActivate = await interaction.activate(target.name, status.project.root, status.state?.environment === target.name);
     }
     if (target.kind === "library" && shouldActivate) throw new SkillenvError("--activate requires an environment target", "INVALID_INPUT");
-    if (shouldActivate) status ??= await getStatus(cwd);
+    if (shouldActivate) status ??= await getStatus(cwd, { recover: !request.dryRun });
 
     const plan: InstallPlan = {
       source: sanitizeSourceInput(source.input),

@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
 export function sanitizeSourceInput(input: string): string {
   try {
     const source = new URL(input);
-    if ((source.protocol === "http:" || source.protocol === "https:") && (source.username || source.password)) {
+    if (source.username || source.password) {
       source.username = "";
       source.password = "";
       return source.toString();
@@ -25,7 +25,7 @@ export function sanitizeSourceInput(input: string): string {
 }
 
 function sanitizeSourceText(input: string): string {
-  return terminalSafeLine(input.replace(/(https?:\/\/)[^\s/@]+@/g, "$1"));
+  return terminalSafeLine(input.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1"));
 }
 
 export interface SkillCandidate {
@@ -71,14 +71,14 @@ function terminalSafeLine(input: string): string {
   return input.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-async function candidateAt(directory: string, root: string): Promise<SkillCandidate | null> {
+async function candidateAt(directory: string, root: string, fallbackName = basename(directory)): Promise<SkillCandidate | null> {
   const skillFile = join(directory, "SKILL.md");
   if (!(await pathExists(skillFile))) return null;
   const fileStat = await lstat(skillFile);
   if (!fileStat.isFile() || fileStat.isSymbolicLink()) throw new SkillenvError(`Invalid SKILL.md at ${relative(root, skillFile)}`, "INVALID_SKILL");
   try {
     const metadata = frontmatter(await readFile(skillFile, "utf8"));
-    const name = nameSchema.parse(typeof metadata.name === "string" ? metadata.name : basename(directory));
+    const name = nameSchema.parse(typeof metadata.name === "string" ? metadata.name : fallbackName);
     return {
       name,
       description: typeof metadata.description === "string" ? terminalSafeLine(metadata.description) : "No description provided",
@@ -91,8 +91,8 @@ async function candidateAt(directory: string, root: string): Promise<SkillCandid
   }
 }
 
-async function discoverSkills(root: string): Promise<SkillCandidate[]> {
-  const rootSkill = await candidateAt(root, root);
+async function discoverSkills(root: string, rootFallbackName?: string): Promise<SkillCandidate[]> {
+  const rootSkill = await candidateAt(root, root, rootFallbackName);
   if (rootSkill) return [rootSkill];
   const directories: string[] = [];
   const canonicalRoot = await realpath(root);
@@ -150,6 +150,7 @@ export async function resolveSource(input: string): Promise<ResolvedSource> {
     if (!skills.length) throw new SkillenvError(`No skills found in ${input}`, "NO_SKILLS_FOUND");
     return { input, kind: "local", root: local, revision: null, skills, cleanup: async () => {} };
   }
+  if (localStat) throw new SkillenvError(`Local source is not a directory: ${input}`, "SOURCE_UNSUPPORTED");
 
   const remote = gitUrl(input);
   if (!remote) throw new SkillenvError(`Source is neither a local directory nor a supported Git source: ${input}`, "SOURCE_UNSUPPORTED");
@@ -161,7 +162,8 @@ export async function resolveSource(input: string): Promise<ResolvedSource> {
     args.push(remote.url, checkout);
     await execFileAsync("git", args, { encoding: "utf8", maxBuffer: 1024 * 1024 });
     const { stdout } = await execFileAsync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" });
-    const skills = await discoverSkills(checkout);
+    const repositoryName = basename(new URL(remote.url.replace(/^git@([^:]+):/, "ssh://$1/")).pathname).replace(/\.git$/, "");
+    const skills = await discoverSkills(checkout, repositoryName);
     if (!skills.length) throw new SkillenvError(`No skills found in ${input}`, "NO_SKILLS_FOUND");
     return {
       input,
