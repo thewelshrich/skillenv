@@ -131,8 +131,8 @@ describe("installer", () => {
     expect(JSON.parse(await readFile(join(project, ".skillenv/state.json"), "utf8"))).toMatchObject({ environment: "frontend" });
     expect(await pathExists(join(project, ".agents/skills/react/SKILL.md"))).toBe(true);
     expect(await readFile(join(project, ".agents/skills/react/SKILL.md"), "utf8")).toContain("original");
-    expect(await pathExists(join(home, "environments/backend.json"))).toBe(false);
-    expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toContain("original");
+    expect(await pathExists(join(home, "environments/backend.json"))).toBe(true);
+    expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toContain("replacement");
   });
 
   it("requires deterministic selection, target, and confirmation", async () => {
@@ -376,16 +376,22 @@ describe("installer", () => {
     await writeFile(join(home, "skills/react/SKILL.md"), "original\n");
     await mkdir(join(interrupted, "backup/skills"), { recursive: true });
     await rename(join(home, "skills/react"), join(interrupted, "backup/skills/react"));
+    const previousEnvironment = { version: 1 as const, name: "frontend", skills: ["react"] };
+    const nextEnvironment = { version: 1 as const, name: "frontend", skills: ["playwright", "react"] };
+    await mkdir(join(home, "environments"), { recursive: true });
+    await writeFile(join(home, "environments/frontend.json"), `${JSON.stringify(nextEnvironment, null, 2)}\n`);
     await writeFile(join(interrupted, "journal.json"), `${JSON.stringify({
       version: 1,
       phase: "prepared",
       entries: [{ name: "react", metadataOnly: false, hadSkill: true, hadMetadata: false }],
+      environment: { name: "frontend", previous: previousEnvironment, next: nextEnvironment },
     })}\n`);
     const source = await makeCollection([{ name: "playwright" }]);
 
     await install({ source, target: { kind: "library" }, yes: true, cwd: project });
 
     expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toBe("original\n");
+    expect(JSON.parse(await readFile(join(home, "environments/frontend.json"), "utf8"))).toEqual(previousEnvironment);
     expect(await pathExists(join(home, "skills/playwright/SKILL.md"))).toBe(true);
     expect(await pathExists(interrupted)).toBe(false);
   });
@@ -453,5 +459,32 @@ describe("installer", () => {
 
     await expect(change.rollback()).rejects.toMatchObject({ code: "ENVIRONMENT_CHANGED" });
     expect(JSON.parse(await readFile(join(home, "environments/frontend.json"), "utf8")).skills).toEqual(["playwright"]);
+  });
+
+  it("rejects case aliases already present in an environment", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    await install({ source, target: { kind: "environment", name: "frontend", create: true }, yes: true, cwd: project });
+
+    await expect(putEnvironmentSkills({ name: "frontend", create: false }, ["React"]))
+      .rejects.toMatchObject({ code: "DUPLICATE_SKILL" });
+  });
+
+  it("serializes forward environment updates", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    await install({ source, target: { kind: "environment", name: "frontend", create: true }, yes: true, cwd: project });
+    let release!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const first = putEnvironmentSkills({ name: "frontend", create: false }, ["react"], { beforeWrite: async () => {
+      markStarted();
+      await gate;
+    } });
+    await started;
+
+    await expect(putEnvironmentSkills({ name: "frontend", create: false }, ["react"]))
+      .rejects.toMatchObject({ code: "ENVIRONMENT_BUSY" });
+    release();
+    await first;
   });
 });

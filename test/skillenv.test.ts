@@ -120,8 +120,8 @@ describe("skillenv", () => {
       phase: "prepared",
       previous,
       planned: [
-        { skill: "react", path: ".agents/skills/react" },
-        { skill: "react", path: ".claude/skills/react" },
+        { skill: "react", path: ".agents/skills/react", hash: previous.managed.find((entry: { path: string }) => entry.path === ".agents/skills/react").hash },
+        { skill: "react", path: ".claude/skills/react", hash: previous.managed.find((entry: { path: string }) => entry.path === ".claude/skills/react").hash },
       ],
     })}\n`);
 
@@ -131,6 +131,32 @@ describe("skillenv", () => {
     expect(status.drifted).toEqual([]);
     expect(await pathExists(join(project, ".agents/skills/react/SKILL.md"))).toBe(true);
     expect(await pathExists(transaction)).toBe(false);
+  });
+
+  it("preserves edits to a path from an interrupted activation", async () => {
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+    const transaction = join(project, ".skillenv/staging-interrupted");
+    const destination = join(project, ".agents/skills/react");
+    await mkdir(destination, { recursive: true });
+    await writeFile(join(destination, "SKILL.md"), "user edit\n");
+    await mkdir(transaction, { recursive: true });
+    await writeFile(join(transaction, "journal.json"), `${JSON.stringify({
+      version: 1,
+      phase: "prepared",
+      previous: null,
+      planned: [{ skill: "react", path: ".agents/skills/react", hash: "a".repeat(64) }],
+    })}\n`);
+
+    await expect(getStatus(project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
+    expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe("user edit\n");
+  });
+
+  it("reads inactive status without creating project state", async () => {
+    const status = await getStatus(project);
+
+    expect(status.state).toBeNull();
+    expect(await pathExists(join(project, ".skillenv"))).toBe(false);
   });
 
   it("refuses to delete a managed copy that was modified", async () => {

@@ -25,7 +25,7 @@ export function sanitizeSourceInput(input: string): string {
 }
 
 function sanitizeSourceText(input: string): string {
-  return input.replace(/(https?:\/\/)[^\s/@]+@/g, "$1");
+  return terminalSafeLine(input.replace(/(https?:\/\/)[^\s/@]+@/g, "$1"));
 }
 
 export interface SkillCandidate {

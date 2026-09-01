@@ -3,8 +3,8 @@ import { cp, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { SkillenvError } from "./errors.js";
 import { copySkillDirectory, hashDirectory, inferSkillName, pathExists, readJson, writeJson } from "./fs.js";
-import { libraryDir, metadataDir, transactionsDir } from "./paths.js";
-import { nameSchema, type SkillMetadata } from "./schema.js";
+import { environmentsDir, libraryDir, metadataDir, transactionsDir } from "./paths.js";
+import { environmentSchema, nameSchema, type Environment, type SkillMetadata } from "./schema.js";
 import { sanitizeSourceInput } from "./sources.js";
 
 async function entryExists(path: string): Promise<boolean> {
@@ -69,6 +69,7 @@ interface TransactionJournal {
   version: 1;
   phase: "prepared" | "committed";
   entries: TransactionEntry[];
+  environment?: { name: string; previous: Environment | null; next: Environment };
 }
 
 function transactionJournal(value: unknown): TransactionJournal | null {
@@ -83,7 +84,16 @@ function transactionJournal(value: unknown): TransactionJournal | null {
     if (!parsedName.success || typeof item.metadataOnly !== "boolean" || typeof item.hadSkill !== "boolean" || typeof item.hadMetadata !== "boolean") return null;
     entries.push({ name: parsedName.data, metadataOnly: item.metadataOnly, hadSkill: item.hadSkill, hadMetadata: item.hadMetadata });
   }
-  return { version: 1, phase: candidate.phase, entries };
+  let environment: TransactionJournal["environment"];
+  if (candidate.environment !== undefined) {
+    const value = candidate.environment as TransactionJournal["environment"];
+    const name = nameSchema.safeParse(value?.name);
+    const previous = value?.previous === null ? null : environmentSchema.safeParse(value?.previous);
+    const next = environmentSchema.safeParse(value?.next);
+    if (!name.success || (previous !== null && !previous.success) || !next.success || next.data.name !== name.data || (previous !== null && previous.data.name !== name.data)) return null;
+    environment = { name: name.data, previous: previous === null ? null : previous.data, next: next.data };
+  }
+  return { version: 1, phase: candidate.phase, entries, ...(environment ? { environment } : {}) };
 }
 
 const locksDir = () => join(transactionsDir(), "locks");
@@ -135,6 +145,18 @@ async function recoverLibraryTransactions(): Promise<void> {
     const backupSkills = join(root, "backup", "skills");
     const backupMetadata = join(root, "backup", "metadata");
     if (journal?.version === 1 && journal.phase === "prepared") {
+      if (journal.environment) {
+        const path = join(environmentsDir(), `${journal.environment.name}.json`);
+        const exists = await pathExists(path);
+        const current = exists ? environmentSchema.parse(await readJson(path)) : null;
+        const matches = (left: Environment | null, right: Environment | null) => JSON.stringify(left) === JSON.stringify(right);
+        if (matches(current, journal.environment.next)) {
+          if (journal.environment.previous) await writeJson(path, journal.environment.previous);
+          else await rm(path, { force: true });
+        } else if (!matches(current, journal.environment.previous)) {
+          throw new SkillenvError(`Environment '${journal.environment.name}' changed during interrupted recovery`, "RECOVERY_REQUIRED");
+        }
+      }
       for (const item of [...journal.entries].reverse()) {
         const destination = join(libraryDir(), item.name);
         const metadataDestination = join(metadataDir(), `${item.name}.json`);
@@ -210,6 +232,7 @@ export interface LibraryChange {
   installed: string[];
   replaced: string[];
   unchanged: string[];
+  recordEnvironment(previous: Environment | null, next: Environment): Promise<void>;
   rollback(): Promise<void>;
   finalize(): Promise<void>;
 }
@@ -362,6 +385,10 @@ export async function installLibrarySkills(
       installed,
       replaced,
       unchanged: inspection.unchanged,
+      recordEnvironment: async (previous, next) => {
+        journal.environment = { name: next.name, previous, next };
+        await writeJson(join(transactionRoot, "journal.json"), journal);
+      },
       rollback,
       finalize: async () => {
         try {

@@ -130,22 +130,23 @@ export async function install(request: InstallRequest, interaction?: InstallInte
 
     let libraryChange: LibraryChange | null = null;
     let environmentChange: EnvironmentChange | null = null;
+    let transactionFinalized = false;
     try {
       libraryChange = await installLibrarySkills(selected, { input: source.input, kind: source.kind, revision: source.revision }, { replace, allowedConflicts });
       if (target.kind === "environment") {
-        environmentChange = await putEnvironmentSkills(target, selected.map((skill) => skill.name));
-        if (shouldActivate) {
-          await activate(target.name, cwd);
-        }
+        environmentChange = await putEnvironmentSkills(target, selected.map((skill) => skill.name), {
+          beforeWrite: (previous, next) => libraryChange!.recordEnvironment(previous, next),
+        });
       }
+      await libraryChange.finalize();
+      transactionFinalized = true;
+      if (target.kind === "environment" && shouldActivate) await activate(target.name, cwd);
     } catch (error) {
       const recoveryErrors: unknown[] = [];
-      await environmentChange?.rollback().catch((recoveryError) => {
-        recoveryErrors.push(recoveryError);
-      });
-      await libraryChange?.rollback().catch((recoveryError) => {
-        recoveryErrors.push(recoveryError);
-      });
+      if (!transactionFinalized) {
+        await environmentChange?.rollback().catch((recoveryError) => recoveryErrors.push(recoveryError));
+        await libraryChange?.rollback().catch((recoveryError) => recoveryErrors.push(recoveryError));
+      }
       if (recoveryErrors.length) {
         const original = error instanceof Error ? error.message : String(error);
         const recovery = recoveryErrors.map((item) => item instanceof Error ? item.message : String(item)).join("; ");
@@ -153,7 +154,6 @@ export async function install(request: InstallRequest, interaction?: InstallInte
       }
       throw error;
     }
-    await libraryChange.finalize().catch(() => {});
 
     const result: InstallResult = {
       status: "installed",

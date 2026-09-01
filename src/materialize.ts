@@ -56,7 +56,7 @@ interface ActivationJournal {
   version: 1;
   phase: "prepared" | "committed";
   previous: ProjectState | null;
-  planned: Array<{ skill: string; path: string }>;
+  planned: Array<{ skill: string; path: string; hash: string }>;
 }
 
 function parseActivationJournal(value: unknown): ActivationJournal | null {
@@ -65,13 +65,14 @@ function parseActivationJournal(value: unknown): ActivationJournal | null {
   if (candidate.version !== 1 || (candidate.phase !== "prepared" && candidate.phase !== "committed") || !Array.isArray(candidate.planned)) return null;
   const previous = candidate.previous === null ? null : projectStateSchema.safeParse(candidate.previous);
   if (previous !== null && !previous.success) return null;
-  const planned: Array<{ skill: string; path: string }> = [];
+  const planned: Array<{ skill: string; path: string; hash: string }> = [];
   for (const entry of candidate.planned) {
     if (!entry || typeof entry !== "object") return null;
     const item = entry as { skill?: unknown; path?: unknown };
     const skill = nameSchema.safeParse(item.skill);
-    if (!skill.success || typeof item.path !== "string" || !isAdapterSkillPath(item.path, skill.data)) return null;
-    planned.push({ skill: skill.data, path: item.path });
+    const hash = (entry as { hash?: unknown }).hash;
+    if (!skill.success || typeof item.path !== "string" || !isAdapterSkillPath(item.path, skill.data) || typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash)) return null;
+    planned.push({ skill: skill.data, path: item.path, hash });
   }
   return { version: 1, phase: candidate.phase, previous: previous === null ? null : previous.data, planned };
 }
@@ -125,7 +126,16 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
     if (journal.phase === "prepared") {
       for (const planned of journal.planned) {
         if (!(await pathExists(join(root, "next", planned.path)))) {
-          await rm(resolveManagedPath(project.root, planned.path, planned.skill), { recursive: true, force: true });
+          const destination = resolveManagedPath(project.root, planned.path, planned.skill);
+          if (await pathExists(destination)) {
+            const currentHash = await hashDirectory(destination);
+            const previous = journal.previous?.managed.find((item) => item.path === planned.path);
+            const backup = previous ? join(root, "backup", previous.path) : null;
+            if (currentHash === planned.hash) await rm(destination, { recursive: true, force: true });
+            else if (!(previous && currentHash === previous.hash && backup && !(await pathExists(backup)))) {
+              throw new SkillenvError(`Interrupted activation path was modified: ${planned.path}`, "RECOVERY_REQUIRED");
+            }
+          }
         }
       }
       for (const previous of journal.previous?.managed ?? []) {
@@ -142,6 +152,14 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
     }
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function hasActivationTransactions(root: string): Promise<boolean> {
+  const entries = await readdir(join(root, ".skillenv"), { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  return entries.some((entry) => entry.isDirectory() && entry.name.startsWith("staging-"));
 }
 
 export async function activate(environmentName: string, cwd = process.cwd()): Promise<ActivationResult> {
@@ -178,7 +196,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
   const staged: Array<{ skill: string; path: string; stagedPath: string; hash: string }> = [];
   const installed: string[] = [];
   const backedUp: Array<{ skill: string; path: string; backupPath: string }> = [];
-  const journal: ActivationJournal = { version: 1, phase: "prepared", previous, planned };
+  const journal: ActivationJournal = { version: 1, phase: "prepared", previous, planned: [] };
   let preserveStaging = false;
   try {
     for (const entry of planned) {
@@ -187,6 +205,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
       await copyDirectory(source, stagedPath);
       staged.push({ ...entry, stagedPath, hash: await hashDirectory(stagedPath) });
     }
+    journal.planned = staged.map(({ skill, path, hash }) => ({ skill, path, hash }));
     await writeJson(journalPath, journal);
 
     for (const entry of previous?.managed ?? []) {
@@ -252,19 +271,21 @@ export interface StatusResult {
 
 export async function getStatus(cwd = process.cwd()): Promise<StatusResult> {
   const project = await findProject(cwd);
-  const releaseLock = await acquireProjectLock(project.root);
-  try {
-    await recoverActivationTransactions(project);
-    const state = await readProjectState(project.root);
-    const drifted: string[] = [];
-    for (const entry of state?.managed ?? []) {
-      const absolute = resolveManagedPath(project.root, entry.path, entry.skill);
-      if (!(await pathExists(absolute)) || (await hashDirectory(absolute)) !== entry.hash) drifted.push(entry.path);
+  if (await hasActivationTransactions(project.root)) {
+    const releaseLock = await acquireProjectLock(project.root);
+    try {
+      await recoverActivationTransactions(project);
+    } finally {
+      await releaseLock();
     }
-    return { project, state, drifted };
-  } finally {
-    await releaseLock();
   }
+  const state = await readProjectState(project.root);
+  const drifted: string[] = [];
+  for (const entry of state?.managed ?? []) {
+    const absolute = resolveManagedPath(project.root, entry.path, entry.skill);
+    if (!(await pathExists(absolute)) || (await hashDirectory(absolute)) !== entry.hash) drifted.push(entry.path);
+  }
+  return { project, state, drifted };
 }
 
 export async function deactivate(cwd = process.cwd()): Promise<{ project: Project; environment: string | null }> {
