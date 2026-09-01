@@ -1,8 +1,9 @@
 import { listEnvironments, putEnvironmentSkills, type EnvironmentChange } from "./environments.js";
 import { CancelledError, SkillenvError } from "./errors.js";
 import { inspectLibrary, installLibrarySkills, type LibraryChange } from "./library.js";
-import { activate, getStatus } from "./materialize.js";
+import { activate, deactivate, getStatus, type StatusResult } from "./materialize.js";
 import type { InstallInteraction, TargetDecision } from "./prompts.js";
+import { nameSchema } from "./schema.js";
 import { resolveSource, type ResolvedSource, type SkillCandidate } from "./sources.js";
 
 export type SkillSelection = { kind: "all" } | { kind: "named"; names: string[] };
@@ -81,23 +82,29 @@ export async function install(request: InstallRequest, interaction?: InstallInte
       if (!replace) throw new CancelledError();
     }
 
-    const [environments, status] = await Promise.all([listEnvironments(), getStatus(cwd)]);
+    const environments = await listEnvironments();
+    let status: StatusResult | null = null;
     let target = request.target;
     if (!target) {
       if (!interaction) requireInput("Choose --env <name>, --create-env <name>, or --library-only");
+      status = await getStatus(cwd);
       target = await interaction.target(environments, status.state?.environment ?? null);
     }
     if (target.kind === "environment") {
-      const exists = environments.some((environment) => environment.name === target.name);
+      const name = nameSchema.parse(target.name);
+      target = { ...target, name };
+      const exists = environments.some((environment) => environment.name === name);
       if (target.create && exists) throw new SkillenvError(`Environment '${target.name}' already exists`);
       if (!target.create && !exists) throw new SkillenvError(`Unknown environment '${target.name}'`);
     }
 
     let shouldActivate = request.activate ?? false;
     if (target.kind === "environment" && request.activate === undefined && interaction) {
+      status ??= await getStatus(cwd);
       shouldActivate = await interaction.activate(target.name, status.project.root, status.state?.environment === target.name);
     }
     if (target.kind === "library" && shouldActivate) throw new SkillenvError("--activate requires an environment target", "INVALID_INPUT");
+    if (shouldActivate) status ??= await getStatus(cwd);
 
     const plan: InstallPlan = {
       source: source.input,
@@ -106,10 +113,13 @@ export async function install(request: InstallRequest, interaction?: InstallInte
       unchanged: inspection.unchanged,
       target,
       activate: shouldActivate,
-      projectRoot: shouldActivate ? status.project.root : null,
+      projectRoot: shouldActivate ? status!.project.root : null,
     };
 
-    if (request.dryRun) return { status: "planned", plan };
+    if (request.dryRun) {
+      interaction?.preview(planLines(plan));
+      return { status: "planned", plan };
+    }
     if (!request.yes) {
       if (!interaction) requireInput("Confirmation required; pass --yes for non-interactive installation");
       if (!(await interaction.confirm(planLines(plan)))) throw new CancelledError();
@@ -117,15 +127,29 @@ export async function install(request: InstallRequest, interaction?: InstallInte
 
     let libraryChange: LibraryChange | null = null;
     let environmentChange: EnvironmentChange | null = null;
+    let activationAttempted = false;
     try {
       libraryChange = await installLibrarySkills(selected, { input: source.input, kind: source.kind, revision: source.revision }, { replace });
       if (target.kind === "environment") {
         environmentChange = await putEnvironmentSkills(target, selected.map((skill) => skill.name));
-        if (shouldActivate) await activate(target.name, cwd);
+        if (shouldActivate) {
+          activationAttempted = true;
+          await activate(target.name, cwd);
+        }
       }
     } catch (error) {
-      await environmentChange?.rollback();
-      await libraryChange?.rollback();
+      const recoveryErrors: unknown[] = [];
+      await environmentChange?.rollback().catch((recoveryError) => recoveryErrors.push(recoveryError));
+      if (activationAttempted) {
+        const previousEnvironment = status?.state?.environment ?? null;
+        await (previousEnvironment ? activate(previousEnvironment, cwd) : deactivate(cwd)).catch((recoveryError) => recoveryErrors.push(recoveryError));
+      }
+      await libraryChange?.rollback().catch((recoveryError) => recoveryErrors.push(recoveryError));
+      if (recoveryErrors.length) {
+        const original = error instanceof Error ? error.message : String(error);
+        const recovery = recoveryErrors.map((item) => item instanceof Error ? item.message : String(item)).join("; ");
+        throw new SkillenvError(`Installation failed: ${original}. Automatic recovery was incomplete: ${recovery}`, "RECOVERY_REQUIRED");
+      }
       throw error;
     }
     await libraryChange.finalize().catch(() => {});
@@ -146,6 +170,6 @@ export async function install(request: InstallRequest, interaction?: InstallInte
     }
     throw error;
   } finally {
-    await source?.cleanup();
+    await source?.cleanup().catch(() => {});
   }
 }

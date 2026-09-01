@@ -5,6 +5,7 @@ import { SkillenvError } from "./errors.js";
 import { copySkillDirectory, hashDirectory, inferSkillName, pathExists, writeJson } from "./fs.js";
 import { libraryDir, metadataDir, transactionsDir } from "./paths.js";
 import { nameSchema, type SkillMetadata } from "./schema.js";
+import { sanitizeSourceInput } from "./sources.js";
 
 export async function addSkill(sourceInput: string, options: { name?: string; force?: boolean } = {}): Promise<string> {
   const source = resolve(sourceInput);
@@ -56,10 +57,12 @@ export async function inspectLibrary(skills: readonly PreparedSkill[]): Promise<
   for (const skill of skills) {
     const destination = join(libraryDir(), skill.name);
     if (!(await pathExists(destination))) continue;
-    const [existingHash, candidateHash] = await Promise.all([
-      hashDirectory(destination),
-      hashDirectory(skill.directory, { ignoreNames: new Set([".git"]) }),
-    ]);
+    const candidateHash = await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]) });
+    const existingHash = await hashDirectory(destination).catch(() => null);
+    if (existingHash === null) {
+      conflicts.push(skill.name);
+      continue;
+    }
     if (existingHash === candidateHash) unchanged.push(skill.name);
     else conflicts.push(skill.name);
   }
@@ -92,23 +95,28 @@ export async function installLibrarySkills(
   const unchanged = new Set(inspection.unchanged);
   const installed = skills.filter((skill) => !unchanged.has(skill.name)).map((skill) => skill.name);
   const replaced = inspection.conflicts;
+  const metadataOnly = new Set<string>();
+  for (const skill of skills.filter((candidate) => unchanged.has(candidate.name))) {
+    if (!(await pathExists(join(metadataDir(), `${skill.name}.json`)))) metadataOnly.add(skill.name);
+  }
+  const metadataNames = new Set([...installed, ...metadataOnly]);
 
   try {
     for (const skill of skills) await hashDirectory(skill.directory, { ignoreNames: new Set([".git"]) });
     await mkdir(stagedSkills, { recursive: true });
     await mkdir(stagedMetadata, { recursive: true });
-    for (const skill of skills.filter((candidate) => !unchanged.has(candidate.name))) {
+    for (const skill of skills.filter((candidate) => metadataNames.has(candidate.name))) {
       const stagedSkill = join(stagedSkills, skill.name);
-      await copySkillDirectory(skill.directory, stagedSkill);
+      if (!metadataOnly.has(skill.name)) await copySkillDirectory(skill.directory, stagedSkill);
       const metadata: SkillMetadata = {
         version: 1,
         name: skill.name,
         description: skill.description,
-        source: source.input,
+        source: sanitizeSourceInput(source.input),
         sourceKind: source.kind,
         sourcePath: skill.sourcePath,
         revision: source.revision,
-        hash: await hashDirectory(stagedSkill),
+        hash: await hashDirectory(metadataOnly.has(skill.name) ? skill.directory : stagedSkill, metadataOnly.has(skill.name) ? { ignoreNames: new Set([".git"]) } : undefined),
         installedAt: new Date().toISOString(),
       };
       await writeJson(join(stagedMetadata, `${skill.name}.json`), metadata);
@@ -118,16 +126,24 @@ export async function installLibrarySkills(
     throw error;
   }
 
-  const committed: string[] = [];
+  interface CommitRecord {
+    name: string;
+    skillBackedUp: boolean;
+    metadataBackedUp: boolean;
+    skillInstalled: boolean;
+    metadataInstalled: boolean;
+  }
+  const committed: CommitRecord[] = [];
   async function rollback(): Promise<void> {
-    for (const name of [...committed].reverse()) {
-      await rm(join(libraryDir(), name), { recursive: true, force: true });
-      await rm(join(metadataDir(), `${name}.json`), { force: true });
-      if (await pathExists(join(backupSkills, name))) {
+    for (const record of [...committed].reverse()) {
+      const { name } = record;
+      if (record.skillInstalled) await rm(join(libraryDir(), name), { recursive: true, force: true });
+      if (record.metadataInstalled) await rm(join(metadataDir(), `${name}.json`), { force: true });
+      if (record.skillBackedUp) {
         await mkdir(libraryDir(), { recursive: true });
         await rename(join(backupSkills, name), join(libraryDir(), name));
       }
-      if (await pathExists(join(backupMetadata, `${name}.json`))) {
+      if (record.metadataBackedUp) {
         await mkdir(metadataDir(), { recursive: true });
         await rename(join(backupMetadata, `${name}.json`), join(metadataDir(), `${name}.json`));
       }
@@ -138,20 +154,27 @@ export async function installLibrarySkills(
   try {
     await mkdir(libraryDir(), { recursive: true });
     await mkdir(metadataDir(), { recursive: true });
-    for (const name of installed) {
+    for (const name of metadataNames) {
       const destination = join(libraryDir(), name);
       const metadataDestination = join(metadataDir(), `${name}.json`);
-      if (await pathExists(destination)) {
+      const record: CommitRecord = { name, skillBackedUp: false, metadataBackedUp: false, skillInstalled: false, metadataInstalled: false };
+      committed.push(record);
+      if (!metadataOnly.has(name) && await pathExists(destination)) {
         await mkdir(backupSkills, { recursive: true });
         await rename(destination, join(backupSkills, name));
+        record.skillBackedUp = true;
       }
       if (await pathExists(metadataDestination)) {
         await mkdir(backupMetadata, { recursive: true });
         await rename(metadataDestination, join(backupMetadata, `${name}.json`));
+        record.metadataBackedUp = true;
       }
-      committed.push(name);
-      await rename(join(stagedSkills, name), destination);
+      if (!metadataOnly.has(name)) {
+        await rename(join(stagedSkills, name), destination);
+        record.skillInstalled = true;
+      }
       await rename(join(stagedMetadata, `${name}.json`), metadataDestination);
+      record.metadataInstalled = true;
     }
   } catch (error) {
     await rollback();

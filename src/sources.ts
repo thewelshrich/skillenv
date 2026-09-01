@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { parse } from "yaml";
 import { SkillenvError } from "./errors.js";
@@ -9,6 +9,20 @@ import { pathExists } from "./fs.js";
 import { nameSchema } from "./schema.js";
 
 const execFileAsync = promisify(execFile);
+
+export function sanitizeSourceInput(input: string): string {
+  try {
+    const source = new URL(input);
+    if ((source.protocol === "http:" || source.protocol === "https:") && (source.username || source.password)) {
+      source.username = "";
+      source.password = "";
+      return source.toString();
+    }
+  } catch {
+    // Local paths and Git's SCP-style syntax are not URLs.
+  }
+  return input;
+}
 
 export interface SkillCandidate {
   name: string;
@@ -73,12 +87,32 @@ async function discoverSkills(root: string): Promise<SkillCandidate[]> {
   const rootSkill = await candidateAt(root, root);
   if (rootSkill) return [rootSkill];
   const directories: string[] = [];
+  const canonicalRoot = await realpath(root);
   for (const collection of ["skills", ".agents/skills", ".claude/skills"]) {
     const collectionRoot = join(root, collection);
-    const entries = await readdir(collectionRoot, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return [];
+    let prefix = root;
+    for (const segment of collection.split("/")) {
+      prefix = join(prefix, segment);
+      const segmentStat = await lstat(prefix).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (!segmentStat) break;
+      if (segmentStat.isSymbolicLink()) throw new SkillenvError(`Invalid skill collection: ${collection}`, "INVALID_SKILL");
+    }
+    const collectionStat = await lstat(collectionRoot).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
       throw error;
     });
+    if (!collectionStat) continue;
+    if (collectionStat.isSymbolicLink() || !collectionStat.isDirectory()) {
+      throw new SkillenvError(`Invalid skill collection: ${collection}`, "INVALID_SKILL");
+    }
+    const canonicalCollection = await realpath(collectionRoot);
+    if (canonicalCollection !== canonicalRoot && !canonicalCollection.startsWith(`${canonicalRoot}${sep}`)) {
+      throw new SkillenvError(`Skill collection escapes source root: ${collection}`, "INVALID_SKILL");
+    }
+    const entries = await readdir(collectionRoot, { withFileTypes: true });
     directories.push(...entries.filter((entry) => entry.isDirectory()).map((entry) => join(collectionRoot, entry.name)));
   }
 

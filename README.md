@@ -65,7 +65,7 @@ Those copies are local to you. In Git repositories, Skillenv records them in `.g
 
 ## Install
 
-Skillenv requires Node.js 20 or newer.
+Skillenv requires Node.js 20.12 or newer.
 
 ```bash
 npm install -g skillenv

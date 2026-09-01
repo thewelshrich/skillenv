@@ -17,6 +17,7 @@ export interface InstallInteraction {
   target(environments: readonly Environment[], activeEnvironment: string | null): Promise<TargetDecision>;
   environmentName(): Promise<string>;
   activate(environment: string, projectRoot: string, currentlyActive: boolean): Promise<boolean>;
+  preview(lines: readonly string[]): void;
   confirm(lines: readonly string[]): Promise<boolean>;
   success(message: string): void;
   cancel(): void;
@@ -116,6 +117,11 @@ export class ClackInteraction implements InstallInteraction {
   async confirm(lines: readonly string[]): Promise<boolean> {
     p.note(lines.join("\n"), "Ready");
     return value(await p.confirm({ message: "Continue?", initialValue: true }));
+  }
+
+  preview(lines: readonly string[]): void {
+    p.note(lines.join("\n"), "Installation plan");
+    p.outro("No changes made");
   }
 
   success(message: string): void {
