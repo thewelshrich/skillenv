@@ -1,14 +1,15 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { install } from "../src/install.js";
 import { pathExists } from "../src/fs.js";
+import { installLibrarySkills } from "../src/library.js";
 import type { InstallInteraction, TargetDecision } from "../src/prompts.js";
 import type { Environment } from "../src/schema.js";
-import { sanitizeSourceInput, type SkillCandidate } from "../src/sources.js";
+import { resolveSource, sanitizeSourceInput, type SkillCandidate } from "../src/sources.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -101,7 +102,7 @@ describe("installer", () => {
   });
 
   it("restores the prior project, environment, and library when activation fails", async () => {
-    const first = await makeCollection([{ name: "react" }]);
+    const first = await makeCollection([{ name: "react", body: "original" }]);
     await install({
       source: first,
       target: { kind: "environment", name: "frontend", create: true },
@@ -112,21 +113,22 @@ describe("installer", () => {
     const gitExclude = join(project, ".git/info/exclude");
     await rm(gitExclude);
     await mkdir(gitExclude);
-    const second = await makeCollection([{ name: "playwright" }]);
+    const second = await makeCollection([{ name: "react", body: "replacement" }]);
 
     await expect(install({
       source: second,
       target: { kind: "environment", name: "backend", create: true },
       activate: true,
+      replace: true,
       yes: true,
       cwd: project,
     })).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
 
     expect(JSON.parse(await readFile(join(project, ".skillenv/state.json"), "utf8"))).toMatchObject({ environment: "frontend" });
     expect(await pathExists(join(project, ".agents/skills/react/SKILL.md"))).toBe(true);
-    expect(await pathExists(join(project, ".agents/skills/playwright"))).toBe(false);
+    expect(await readFile(join(project, ".agents/skills/react/SKILL.md"), "utf8")).toContain("original");
     expect(await pathExists(join(home, "environments/backend.json"))).toBe(false);
-    expect(await pathExists(join(home, "skills/playwright"))).toBe(false);
+    expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toContain("original");
   });
 
   it("requires deterministic selection, target, and confirmation", async () => {
@@ -249,6 +251,79 @@ describe("installer", () => {
     expect(result.status).toBe("installed");
   });
 
+  it("does not enumerate malformed environments for a library-only install", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    await mkdir(join(home, "environments"), { recursive: true });
+    await writeFile(join(home, "environments/broken.json"), "not json\n");
+
+    const result = await install({ source, target: { kind: "library" }, yes: true, cwd: project });
+
+    expect(result.status).toBe("installed");
+  });
+
+  it("treats executable mode changes as library conflicts", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    const base = { source, target: { kind: "library" } as const, yes: true, cwd: project };
+    await install(base);
+    await chmod(join(source, "skills/react/SKILL.md"), 0o755);
+
+    const result = await install({ ...base, replace: true, dryRun: true });
+
+    expect(result.status).toBe("planned");
+    if (result.status === "planned") expect(result.plan.replacing).toEqual(["react"]);
+  });
+
+  it("serializes concurrent library updates", async () => {
+    const firstSource = await resolveSource(await makeCollection([{ name: "react" }]));
+    const secondSource = await resolveSource(await makeCollection([{ name: "playwright" }]));
+    const change = await installLibrarySkills(firstSource.skills, { input: firstSource.input, kind: firstSource.kind, revision: null }, { replace: false });
+    try {
+      await expect(installLibrarySkills(secondSource.skills, { input: secondSource.input, kind: secondSource.kind, revision: null }, { replace: false }))
+        .rejects.toMatchObject({ code: "LIBRARY_BUSY" });
+    } finally {
+      await change.finalize();
+    }
+  });
+
+  it("recovers an interrupted library transaction before installing", async () => {
+    const interrupted = join(home, "transactions/interrupted");
+    await mkdir(join(home, "skills/react"), { recursive: true });
+    await writeFile(join(home, "skills/react/SKILL.md"), "original\n");
+    await mkdir(join(interrupted, "backup/skills"), { recursive: true });
+    await rename(join(home, "skills/react"), join(interrupted, "backup/skills/react"));
+    await writeFile(join(interrupted, "journal.json"), `${JSON.stringify({
+      version: 1,
+      phase: "prepared",
+      entries: [{ name: "react", metadataOnly: false, hadSkill: true, hadMetadata: false }],
+    })}\n`);
+    const source = await makeCollection([{ name: "playwright" }]);
+
+    await install({ source, target: { kind: "library" }, yes: true, cwd: project });
+
+    expect(await readFile(join(home, "skills/react/SKILL.md"), "utf8")).toBe("original\n");
+    expect(await pathExists(join(home, "skills/playwright/SKILL.md"))).toBe(true);
+    expect(await pathExists(interrupted)).toBe(false);
+  });
+
+  it("normalizes terminal controls in discovered descriptions", async () => {
+    const source = await makeCollection([{ name: "react", description: '"hello\\u001b]0;owned\\u0007 next"' }]);
+
+    const resolved = await resolveSource(source);
+
+    expect(resolved.skills[0]!.description).toBe("hello ]0;owned next");
+  });
+
+  it("rejects case-colliding skill names", async () => {
+    const source = join(sandbox, "case-collision");
+    await mkdir(join(source, "skills/first"), { recursive: true });
+    await mkdir(join(source, "skills/second"), { recursive: true });
+    await writeFile(join(source, "skills/first/SKILL.md"), "---\nname: React\n---\n");
+    await writeFile(join(source, "skills/second/SKILL.md"), "---\nname: react\n---\n");
+
+    await expect(install({ source, target: { kind: "library" }, yes: true, cwd: project }))
+      .rejects.toMatchObject({ code: "DUPLICATE_SKILL" });
+  });
+
   it("rejects symlinked skill collection roots", async () => {
     const source = join(sandbox, "symlinked-collection");
     const outside = await makeCollection([{ name: "react" }]);
@@ -274,6 +349,6 @@ describe("installer", () => {
     })).rejects.toThrow("Symbolic links are not supported");
 
     expect(await pathExists(join(home, "skills/react"))).toBe(false);
-    expect(await pathExists(join(home, "transactions"))).toBe(false);
+    expect(await readdir(join(home, "transactions"))).toEqual([]);
   });
 });

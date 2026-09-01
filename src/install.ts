@@ -4,7 +4,7 @@ import { inspectLibrary, installLibrarySkills, type LibraryChange } from "./libr
 import { activate, deactivate, getStatus, type StatusResult } from "./materialize.js";
 import type { InstallInteraction, TargetDecision } from "./prompts.js";
 import { nameSchema } from "./schema.js";
-import { resolveSource, type ResolvedSource, type SkillCandidate } from "./sources.js";
+import { resolveSource, sanitizeSourceInput, type ResolvedSource, type SkillCandidate } from "./sources.js";
 
 export type SkillSelection = { kind: "all" } | { kind: "named"; names: string[] };
 
@@ -82,7 +82,7 @@ export async function install(request: InstallRequest, interaction?: InstallInte
       if (!replace) throw new CancelledError();
     }
 
-    const environments = await listEnvironments();
+    const environments = !request.target || request.target.kind === "environment" ? await listEnvironments() : [];
     let status: StatusResult | null = null;
     let target = request.target;
     if (!target) {
@@ -107,7 +107,7 @@ export async function install(request: InstallRequest, interaction?: InstallInte
     if (shouldActivate) status ??= await getStatus(cwd);
 
     const plan: InstallPlan = {
-      source: source.input,
+      source: sanitizeSourceInput(source.input),
       skills: selected.map((skill) => skill.name),
       replacing: inspection.conflicts,
       unchanged: inspection.unchanged,
@@ -140,11 +140,11 @@ export async function install(request: InstallRequest, interaction?: InstallInte
     } catch (error) {
       const recoveryErrors: unknown[] = [];
       await environmentChange?.rollback().catch((recoveryError) => recoveryErrors.push(recoveryError));
+      await libraryChange?.rollback().catch((recoveryError) => recoveryErrors.push(recoveryError));
       if (activationAttempted) {
         const previousEnvironment = status?.state?.environment ?? null;
         await (previousEnvironment ? activate(previousEnvironment, cwd) : deactivate(cwd)).catch((recoveryError) => recoveryErrors.push(recoveryError));
       }
-      await libraryChange?.rollback().catch((recoveryError) => recoveryErrors.push(recoveryError));
       if (recoveryErrors.length) {
         const original = error instanceof Error ? error.message : String(error);
         const recovery = recoveryErrors.map((item) => item instanceof Error ? item.message : String(item)).join("; ");

@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { cp, mkdir, readdir, readFile, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { cp, mkdir, readdir, readFile, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { SkillenvError } from "./errors.js";
 
@@ -24,7 +24,13 @@ export async function readJson(path: string): Promise<unknown> {
 
 export async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(value, null, 2)}\n`);
+  const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {});
+  }
 }
 
 export async function copyDirectory(source: string, destination: string): Promise<void> {
@@ -42,7 +48,7 @@ export async function copySkillDirectory(source: string, destination: string): P
   });
 }
 
-export async function hashDirectory(root: string, options: { ignoreNames?: ReadonlySet<string> } = {}): Promise<string> {
+export async function hashDirectory(root: string, options: { ignoreNames?: ReadonlySet<string>; includeModes?: boolean } = {}): Promise<string> {
   const hash = createHash("sha256");
 
   async function visit(directory: string, prefix = ""): Promise<void> {
@@ -52,6 +58,7 @@ export async function hashDirectory(root: string, options: { ignoreNames?: Reado
       if (options.ignoreNames?.has(entry.name)) continue;
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
       const absolute = join(directory, entry.name);
+      if (options.includeModes) hash.update(`m:${(await stat(absolute)).mode & 0o777}\0`);
       if (entry.isSymbolicLink()) {
         throw new SkillenvError(`Symbolic links are not supported in skills: ${relative}`);
       }

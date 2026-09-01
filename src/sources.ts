@@ -24,6 +24,10 @@ export function sanitizeSourceInput(input: string): string {
   return input;
 }
 
+function sanitizeSourceText(input: string): string {
+  return input.replace(/(https?:\/\/)[^\s/@]+@/g, "$1");
+}
+
 export interface SkillCandidate {
   name: string;
   description: string;
@@ -63,6 +67,10 @@ function frontmatter(content: string): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
 }
 
+function terminalSafeLine(input: string): string {
+  return input.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
+}
+
 async function candidateAt(directory: string, root: string): Promise<SkillCandidate | null> {
   const skillFile = join(directory, "SKILL.md");
   if (!(await pathExists(skillFile))) return null;
@@ -73,7 +81,7 @@ async function candidateAt(directory: string, root: string): Promise<SkillCandid
     const name = nameSchema.parse(typeof metadata.name === "string" ? metadata.name : basename(directory));
     return {
       name,
-      description: typeof metadata.description === "string" ? metadata.description.trim() : "No description provided",
+      description: typeof metadata.description === "string" ? terminalSafeLine(metadata.description) : "No description provided",
       directory,
       sourcePath: relative(root, directory) || ".",
     };
@@ -118,10 +126,14 @@ async function discoverSkills(root: string): Promise<SkillCandidate[]> {
 
   const found = (await Promise.all(directories.map((directory) => candidateAt(directory, root)))).filter((skill): skill is SkillCandidate => skill !== null);
   const byName = new Map<string, SkillCandidate>();
+  const byPathName = new Map<string, SkillCandidate>();
   for (const skill of found) {
     const existing = byName.get(skill.name);
     if (existing) throw new SkillenvError(`Duplicate skill name '${skill.name}' at ${existing.sourcePath} and ${skill.sourcePath}`, "DUPLICATE_SKILL");
+    const pathCollision = byPathName.get(skill.name.toLocaleLowerCase("en-US"));
+    if (pathCollision) throw new SkillenvError(`Skill names '${pathCollision.name}' and '${skill.name}' collide on case-insensitive filesystems`, "DUPLICATE_SKILL");
     byName.set(skill.name, skill);
+    byPathName.set(skill.name.toLocaleLowerCase("en-US"), skill);
   }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name) || a.sourcePath.localeCompare(b.sourcePath));
 }
@@ -160,6 +172,6 @@ export async function resolveSource(input: string): Promise<ResolvedSource> {
     await rm(temporaryRoot, { recursive: true, force: true });
     if (error instanceof SkillenvError) throw error;
     const detail = (error as { stderr?: string }).stderr?.trim();
-    throw new SkillenvError(`Could not fetch ${input}${detail ? `: ${detail}` : ""}`, "SOURCE_UNREACHABLE");
+    throw new SkillenvError(`Could not fetch ${sanitizeSourceInput(input)}${detail ? `: ${sanitizeSourceText(detail)}` : ""}`, "SOURCE_UNREACHABLE");
   }
 }
