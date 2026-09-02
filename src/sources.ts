@@ -345,10 +345,19 @@ export async function resolveSource(input: string, options: ResolveSourceOptions
   const checkout = join(temporaryRoot, "repository");
   try {
     const authentication = await prepareGitCloneAuthentication(remote.url, temporaryRoot);
+    const commitRef = remote.ref && /^[0-9a-f]{40}$/i.test(remote.ref) ? remote.ref : undefined;
     const args = ["clone", "--depth", "1", "--filter=blob:none"];
-    if (remote.ref) args.push("--branch", remote.ref);
+    if (remote.ref && !commitRef) args.push("--branch", remote.ref);
     args.push(authentication.url, checkout);
     await execFileAsync("git", args, { encoding: "utf8", maxBuffer: 1024 * 1024, env: authentication.env });
+    if (commitRef) {
+      await execFileAsync("git", ["-C", checkout, "fetch", "--depth", "1", "origin", commitRef], {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        env: authentication.env,
+      });
+      await execFileAsync("git", ["-C", checkout, "checkout", "--detach", commitRef], { encoding: "utf8" });
+    }
     const { stdout } = await execFileAsync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" });
     const repositoryName = basename(new URL(remote.url.replace(/^git@([^:]+):/, "ssh://$1/")).pathname).replace(/\.git$/, "");
     const skills = await discoverSource(checkout, selectedPath, repositoryName);

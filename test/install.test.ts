@@ -642,6 +642,16 @@ describe("installer", () => {
       } finally {
         await resolved.cleanup();
       }
+
+      const pinned = await resolveSource(`https://github.com/example/skills/tree/${stdout.trim()}/.agents/skills/react`);
+      try {
+        expect(pinned.selectedPath).toBe(".agents/skills/react");
+        expect(pinned.revision).toBe(stdout.trim());
+        expect(pinned.skills).toHaveLength(1);
+        expect(pinned.skills[0]).toMatchObject({ name: "react", sourcePath: ".agents/skills/react" });
+      } finally {
+        await pinned.cleanup();
+      }
     } finally {
       if (previous.count === undefined) delete process.env.GIT_CONFIG_COUNT;
       else process.env.GIT_CONFIG_COUNT = previous.count;
