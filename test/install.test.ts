@@ -445,6 +445,7 @@ describe("installer", () => {
   it("formats complete human-readable installation plans", () => {
     expect(installPlanLines({
       source: "safe/source",
+      path: "skills/frontend",
       skills: ["react", "playwright"],
       replacing: ["react"],
       unchanged: ["playwright"],
@@ -454,6 +455,7 @@ describe("installer", () => {
       projectGitExclude: true,
     })).toEqual([
       "Skills (2): react, playwright",
+      "Path: skills/frontend",
       "Target: personal library",
       "Replace: react",
       "Already current: playwright",
@@ -498,16 +500,298 @@ describe("installer", () => {
     }
   });
 
-  it("sanitizes untrusted discovered paths in duplicate-name errors", async () => {
+  it("installs one selected local skill and preserves repository-relative provenance", async () => {
+    const root = join(sandbox, "selected-variant");
+    for (const [collection, body] of [[".agents/skills", "agents"], [".claude/skills", "claude"]] as const) {
+      const directory = join(root, collection, "impeccable");
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SKILL.md"), `---\nname: impeccable\n---\n\n${body}\n`);
+    }
+
+    const result = await install({
+      source: root,
+      path: ".agents/skills/impeccable",
+      selection: { kind: "all" },
+      target: { kind: "library" },
+      yes: true,
+      cwd: project,
+    });
+
+    expect(result.status).toBe("installed");
+    if (result.status === "installed") expect(result.plan.path).toBe(".agents/skills/impeccable");
+    expect(await readFile(join(home, "skills/impeccable/SKILL.md"), "utf8")).toContain("agents");
+    expect(JSON.parse(await readFile(join(home, "metadata/impeccable.json"), "utf8"))).toMatchObject({
+      source: root,
+      sourcePath: ".agents/skills/impeccable",
+    });
+  });
+
+  it("discovers immediate child skills in a selected collection", async () => {
+    const root = join(sandbox, "nested-catalog");
+    for (const name of ["react", "playwright"]) {
+      const directory = join(root, "catalog/experimental", name);
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SKILL.md"), `---\nname: ${name}\n---\n`);
+    }
+    await mkdir(join(root, "catalog/experimental/nested/not-a-direct-skill"), { recursive: true });
+    await writeFile(join(root, "catalog/experimental/nested/not-a-direct-skill/SKILL.md"), "---\nname: hidden\n---\n");
+
+    const result = await install({
+      source: root,
+      path: "catalog/experimental",
+      selection: { kind: "all" },
+      target: { kind: "library" },
+      dryRun: true,
+      cwd: project,
+    });
+
+    expect(result.status).toBe("planned");
+    if (result.status === "planned") {
+      expect(result.plan.path).toBe("catalog/experimental");
+      expect(result.plan.skills).toEqual(["playwright", "react"]);
+    }
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("wires --path into machine-readable CLI plans", async () => {
+    const root = join(sandbox, "cli-selection");
+    const directory = join(root, ".agents/skills/react");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "SKILL.md"), "---\nname: react\n---\n");
+
+    const { stdout } = await execFileAsync(process.execPath, [
+      "--import", "tsx", "src/cli.ts", "add", root,
+      "--path", ".agents/skills/react", "--all", "--library-only", "--dry-run", "--json",
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, SKILLENV_HOME: home },
+    });
+
+    expect(JSON.parse(stdout)).toMatchObject({
+      status: "planned",
+      plan: { path: ".agents/skills/react", skills: ["react"] },
+    });
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("rejects unsafe explicit source paths", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    for (const path of ["", ".", "/skills/react", "../react", "skills/../react", "skills//react", "skills\\react", "C:/skills/react", "skills/\u001breact"]) {
+      await expect(resolveSource(source, { path })).rejects.toMatchObject({ code: "INVALID_SOURCE_PATH" });
+    }
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("reports missing and non-directory source paths without writing", async () => {
+    const source = await makeCollection([{ name: "react" }]);
+    await writeFile(join(source, "skill.txt"), "not a directory\n");
+
+    await expect(resolveSource(source, { path: "missing" })).rejects.toMatchObject({ code: "SOURCE_PATH_NOT_FOUND" });
+    await expect(resolveSource(source, { path: "skill.txt" })).rejects.toMatchObject({ code: "SOURCE_PATH_UNSUPPORTED" });
+    await expect(resolveSource(source, { path: "skill.txt/nested" })).rejects.toMatchObject({ code: "SOURCE_PATH_UNSUPPORTED" });
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("rejects symlinked source path segments", async () => {
+    const source = join(sandbox, "symlinked-selection");
+    const outside = await makeCollection([{ name: "react" }]);
+    await mkdir(source, { recursive: true });
+    await symlink(join(outside, "skills"), join(source, "linked"));
+
+    await expect(resolveSource(source, { path: "linked/react" })).rejects.toMatchObject({ code: "INVALID_SKILL" });
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("rejects selected collections with no immediate skills", async () => {
+    const source = join(sandbox, "empty-selection");
+    await mkdir(join(source, "catalog/nested/react"), { recursive: true });
+    await writeFile(join(source, "catalog/nested/react/SKILL.md"), "---\nname: react\n---\n");
+
+    await expect(resolveSource(source, { path: "catalog" })).rejects.toMatchObject({ code: "NO_SKILLS_FOUND" });
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("resolves GitHub tree URLs to a repository ref and selected skill", async () => {
+    const repository = join(sandbox, "github-tree-source");
+    const skill = join(repository, ".agents/skills/react");
+    await mkdir(skill, { recursive: true });
+    await writeFile(join(skill, "SKILL.md"), "---\nname: react\n---\n");
+    await execFileAsync("git", ["init", "-q", repository]);
+    await execFileAsync("git", ["-C", repository, "config", "user.name", "Test"]);
+    await execFileAsync("git", ["-C", repository, "config", "user.email", "test@example.com"]);
+    await execFileAsync("git", ["-C", repository, "add", "."]);
+    await execFileAsync("git", ["-C", repository, "commit", "-qm", "fixture"]);
+    await execFileAsync("git", ["-C", repository, "branch", "-M", "main"]);
+    const { stdout } = await execFileAsync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" });
+    const previous = {
+      count: process.env.GIT_CONFIG_COUNT,
+      key: process.env.GIT_CONFIG_KEY_0,
+      value: process.env.GIT_CONFIG_VALUE_0,
+    };
+    process.env.GIT_CONFIG_COUNT = "1";
+    process.env.GIT_CONFIG_KEY_0 = `url.file://${repository}.insteadOf`;
+    process.env.GIT_CONFIG_VALUE_0 = "https://github.com/example/skills.git";
+
+    try {
+      const resolved = await resolveSource("https://github.com/example/skills/tree/main/.agents/skills/react");
+      try {
+        expect(resolved.selectedPath).toBe(".agents/skills/react");
+        expect(resolved.revision).toBe(stdout.trim());
+        expect(resolved.skills).toHaveLength(1);
+        expect(resolved.skills[0]).toMatchObject({ name: "react", sourcePath: ".agents/skills/react" });
+      } finally {
+        await resolved.cleanup();
+      }
+    } finally {
+      if (previous.count === undefined) delete process.env.GIT_CONFIG_COUNT;
+      else process.env.GIT_CONFIG_COUNT = previous.count;
+      if (previous.key === undefined) delete process.env.GIT_CONFIG_KEY_0;
+      else process.env.GIT_CONFIG_KEY_0 = previous.key;
+      if (previous.value === undefined) delete process.env.GIT_CONFIG_VALUE_0;
+      else process.env.GIT_CONFIG_VALUE_0 = previous.value;
+    }
+  });
+
+  it("rejects combining --path semantics with a GitHub tree URL path", async () => {
+    await expect(resolveSource("https://github.com/example/skills/tree/main/skills/react", { path: "skills/playwright" }))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+
+  it("discovers and installs a repository whose only collection is .github/skills", async () => {
+    const root = join(sandbox, "github-collection");
+    const directory = join(root, ".github/skills/react");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "SKILL.md"), "---\nname: react\ndescription: React guidance\n---\n\n# React\n");
+
+    const result = await install({ source: root, target: { kind: "library" }, yes: true, cwd: project });
+
+    expect(result.status).toBe("installed");
+    expect(await pathExists(join(home, "skills/react/SKILL.md"))).toBe(true);
+    const metadata = JSON.parse(await readFile(join(home, "metadata/react.json"), "utf8"));
+    expect(metadata).toMatchObject({ source: root, sourcePath: ".github/skills/react" });
+  });
+
+  it("coalesces identical provider mirrors using deterministic collection precedence", async () => {
+    const root = join(sandbox, "identical-mirrors");
+    const content = "---\nname: react\ndescription: React guidance\n---\n\n# React\n";
+    for (const collection of [".github/skills", ".claude/skills", ".agents/skills", "skills"]) {
+      const directory = join(root, collection, "react");
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SKILL.md"), content);
+    }
+
+    const resolved = await resolveSource(root);
+
+    expect(resolved.skills).toHaveLength(1);
+    expect(resolved.skills[0]).toMatchObject({ name: "react", sourcePath: "skills/react" });
+  });
+
+  it("groups identical mirrors when another variant differs", async () => {
+    const root = join(sandbox, "mixed-variants");
+    for (const [collection, body] of [
+      ["skills", "canonical"],
+      [".agents/skills", "provider"],
+      [".claude/skills", "provider"],
+      [".github/skills", "provider"],
+    ] as const) {
+      const directory = join(root, collection, "react");
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SKILL.md"), `---\nname: react\n---\n\n${body}\n`);
+    }
+
+    const error = await resolveSource(root).catch((caught: unknown) => caught) as { code: string; details: unknown };
+
+    expect(error.code).toBe("AMBIGUOUS_SKILL_VARIANT");
+    expect(error.details).toMatchObject({
+      name: "react",
+      variants: expect.arrayContaining([
+        expect.objectContaining({ paths: ["skills/react"] }),
+        expect.objectContaining({ paths: [".agents/skills/react", ".claude/skills/react", ".github/skills/react"] }),
+      ]),
+    });
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("selects a differing .github skill variant explicitly", async () => {
+    const root = join(sandbox, "github-variant");
+    for (const [collection, body] of [["skills", "canonical"], [".github/skills", "github"]] as const) {
+      const directory = join(root, collection, "react");
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SKILL.md"), `---\nname: react\n---\n\n${body}\n`);
+    }
+
+    const error = await resolveSource(root).catch((caught: unknown) => caught) as { code: string; details: unknown };
+    expect(error).toMatchObject({
+      code: "AMBIGUOUS_SKILL_VARIANT",
+      details: {
+        name: "react",
+        variants: expect.arrayContaining([
+          expect.objectContaining({ paths: ["skills/react"] }),
+          expect.objectContaining({ paths: [".github/skills/react"] }),
+        ]),
+      },
+    });
+
+    const resolved = await resolveSource(root, { path: ".github/skills/react" });
+    expect(resolved.selectedPath).toBe(".github/skills/react");
+    expect(resolved.skills).toHaveLength(1);
+    expect(resolved.skills[0]).toMatchObject({ name: "react", sourcePath: ".github/skills/react" });
+  });
+
+  it("emits structured variant details in JSON mode", async () => {
+    const root = join(sandbox, "json-variants");
+    for (const [collection, body] of [["skills", "canonical"], [".agents/skills", "provider"]] as const) {
+      const directory = join(root, collection, "react");
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SKILL.md"), `---\nname: react\n---\n\n${body}\n`);
+    }
+
+    const failure = await execFileAsync(process.execPath, ["--import", "tsx", "src/cli.ts", "add", root, "--all", "--library-only", "--dry-run", "--json"], {
+      cwd: process.cwd(),
+      env: { ...process.env, SKILLENV_HOME: home },
+    }).catch((error: unknown) => error as { stdout: string; code: number });
+
+    expect("code" in failure ? failure.code : 0).toBe(1);
+    expect(JSON.parse(failure.stdout)).toMatchObject({
+      status: "error",
+      error: {
+        code: "AMBIGUOUS_SKILL_VARIANT",
+        details: {
+          name: "react",
+          variants: expect.arrayContaining([
+            expect.objectContaining({ paths: ["skills/react"] }),
+            expect.objectContaining({ paths: [".agents/skills/react"] }),
+          ]),
+        },
+      },
+    });
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("treats executable mode differences as ambiguous variants", async () => {
+    const root = join(sandbox, "mode-variants");
+    const content = "---\nname: react\n---\n";
+    const paths = [join(root, "skills/react/SKILL.md"), join(root, ".agents/skills/react/SKILL.md")];
+    for (const path of paths) {
+      await mkdir(join(path, ".."), { recursive: true });
+      await writeFile(path, content);
+    }
+    await chmod(paths[1]!, 0o755);
+
+    await expect(resolveSource(root)).rejects.toMatchObject({ code: "AMBIGUOUS_SKILL_VARIANT" });
+  });
+
+  it("sanitizes untrusted discovered paths in ambiguous-variant errors", async () => {
     const root = join(sandbox, "unsafe-paths");
     for (const directory of ["first\u001b[31m", "second"]) {
       await mkdir(join(root, "skills", directory), { recursive: true });
-      await writeFile(join(root, "skills", directory, "SKILL.md"), "---\nname: duplicate\n---\n");
+      await writeFile(join(root, "skills", directory, "SKILL.md"), `---\nname: duplicate\n---\n\n# ${directory}\n`);
     }
 
-    const error = await resolveSource(root).catch((caught: unknown) => caught as Error);
+    const error = await resolveSource(root).catch((caught: unknown) => caught as Error & { code: string });
     expect(error).toBeInstanceOf(Error);
     if (!(error instanceof Error)) throw new Error("Expected source discovery to fail");
+    expect(error.code).toBe("AMBIGUOUS_SKILL_VARIANT");
     expect(error.message).not.toContain("\u001b");
     expect(error.message).toContain("first [31m");
   });
@@ -901,6 +1185,17 @@ describe("installer", () => {
     const outside = await makeCollection([{ name: "react" }]);
     await mkdir(source, { recursive: true });
     await symlink(join(outside, "skills"), join(source, "skills"));
+
+    await expect(install({ source, target: { kind: "library" }, yes: true, cwd: project }))
+      .rejects.toMatchObject({ code: "INVALID_SKILL" });
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("rejects a symlinked .github/skills collection before writing", async () => {
+    const source = join(sandbox, "symlinked-github-collection");
+    const outside = await makeCollection([{ name: "react" }]);
+    await mkdir(join(source, ".github"), { recursive: true });
+    await symlink(join(outside, "skills"), join(source, ".github/skills"));
 
     await expect(install({ source, target: { kind: "library" }, yes: true, cwd: project }))
       .rejects.toMatchObject({ code: "INVALID_SKILL" });
