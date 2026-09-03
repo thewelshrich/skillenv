@@ -258,7 +258,8 @@ describe("skillenv", () => {
     await mkdir(gitExclude);
     const destination = join(project, ".agents/skills/react");
     const editWhenInstalled = (async () => {
-      for (let attempt = 0; attempt < 5000; attempt += 1) {
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
         if (await pathExists(destination)) {
           await writeFile(join(destination, "SKILL.md"), "user edit\n");
           return;
@@ -268,8 +269,10 @@ describe("skillenv", () => {
       throw new Error("Activation did not materialize the expected path");
     })();
 
-    await expect(activate("frontend", project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" });
-    await editWhenInstalled;
+    await Promise.all([
+      expect(activate("frontend", project)).rejects.toMatchObject({ code: "RECOVERY_REQUIRED" }),
+      editWhenInstalled,
+    ]);
     expect(await readFile(join(destination, "SKILL.md"), "utf8")).toBe("user edit\n");
   });
 
