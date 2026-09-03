@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createRequire } from "node:module";
 import { Command, CommanderError } from "commander";
 import { ZodError } from "zod";
 import { registerAddCommands } from "./commands/add.js";
@@ -9,6 +10,7 @@ import { registerUseCommand } from "./commands/use.js";
 import { SkillenvError } from "./errors.js";
 
 const program = new Command();
+const packageVersion = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 const arguments_ = process.argv.slice(2);
 const jsonAddMode = arguments_.includes("add") && arguments_.includes("--json");
 
@@ -19,7 +21,7 @@ function printJsonError(code: string, message: string, details?: unknown): void 
 program
   .name("skillenv")
   .description("Virtual environments for agent skills")
-  .version("0.1.0")
+  .version(packageVersion)
   .showSuggestionAfterError()
   .exitOverride()
   .configureOutput({
