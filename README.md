@@ -118,6 +118,8 @@ skills/
 .github/skills/
 ```
 
+If none of those directories contain skills, Skillenv treats immediate child directories with a `SKILL.md` as a flat collection. This fallback is one level deep; nested packs remain available through `--path` rather than being discovered recursively.
+
 Identical mirrors are coalesced. If copies with the same skill name differ, Skillenv reports the available variants so one can be selected with `--path`.
 
 Select a skill or collection nested inside any source with `--path`:

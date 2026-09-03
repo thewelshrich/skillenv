@@ -488,8 +488,10 @@ describe("installer", () => {
     const repository = join(sandbox, "delightful-skill");
     await mkdir(repository, { recursive: true });
     await writeFile(join(repository, "SKILL.md"), "# Delightful\n");
+    await mkdir(join(repository, "nested-skill"), { recursive: true });
+    await writeFile(join(repository, "nested-skill/SKILL.md"), "---\nname: nested-skill\n---\n");
     await execFileAsync("git", ["init", "-q", repository]);
-    await execFileAsync("git", ["-C", repository, "add", "SKILL.md"]);
+    await execFileAsync("git", ["-C", repository, "add", "."]);
     await execFileAsync("git", ["-C", repository, "-c", "user.name=Skillenv Tests", "-c", "user.email=tests@skillenv.dev", "commit", "-qm", "fixture"]);
 
     const resolved = await resolveSource(`file://${repository}`);
@@ -524,6 +526,84 @@ describe("installer", () => {
       source: root,
       sourcePath: ".agents/skills/impeccable",
     });
+  });
+
+  it("discovers and installs immediate root skills as a flat-collection fallback", async () => {
+    const root = join(sandbox, "flat-collection");
+    for (const name of ["copywriting", "seo-audit"]) {
+      const directory = join(root, name);
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SKILL.md"), `---\nname: ${name}\n---\n\n# ${name}\n`);
+    }
+    await mkdir(join(root, "docs"), { recursive: true });
+    await writeFile(join(root, "README.md"), "# Collection\n");
+    await mkdir(join(root, ".git"), { recursive: true });
+    await writeFile(join(root, ".git/SKILL.md"), "---\nname: repository-internals\n---\n");
+    await mkdir(join(root, "third-party/nested-skill"), { recursive: true });
+    await writeFile(join(root, "third-party/nested-skill/SKILL.md"), "---\nname: nested-skill\n---\n");
+    const outside = join(sandbox, "outside-flat-skill");
+    await mkdir(outside, { recursive: true });
+    await writeFile(join(outside, "SKILL.md"), "---\nname: linked-skill\n---\n");
+    await symlink(outside, join(root, "linked-skill"));
+
+    const result = await install({ source: root, selection: { kind: "all" }, target: { kind: "library" }, yes: true, cwd: project });
+
+    expect(result.status).toBe("installed");
+    if (result.status === "installed") expect(result.plan.skills).toEqual(["copywriting", "seo-audit"]);
+    expect(await pathExists(join(home, "skills/nested-skill"))).toBe(false);
+    expect(await pathExists(join(home, "skills/linked-skill"))).toBe(false);
+    expect(await pathExists(join(home, "skills/repository-internals"))).toBe(false);
+    for (const name of ["copywriting", "seo-audit"]) {
+      const metadata = JSON.parse(await readFile(join(home, `metadata/${name}.json`), "utf8"));
+      expect(metadata).toMatchObject({ source: root, sourcePath: name });
+    }
+  });
+
+  it("uses named collections instead of combining flat-root skills", async () => {
+    const root = join(sandbox, "named-over-flat");
+    await mkdir(join(root, "flat-skill"), { recursive: true });
+    await writeFile(join(root, "flat-skill/SKILL.md"), "---\nname: flat-skill\n---\n");
+    await mkdir(join(root, "skills/canonical-skill"), { recursive: true });
+    await writeFile(join(root, "skills/canonical-skill/SKILL.md"), "---\nname: canonical-skill\n---\n");
+
+    const resolved = await resolveSource(root);
+
+    expect(resolved.skills.map((skill) => skill.name)).toEqual(["canonical-skill"]);
+    expect(resolved.skills[0]).toMatchObject({ sourcePath: "skills/canonical-skill" });
+  });
+
+  it("reports differing duplicate names in a flat collection as variants", async () => {
+    const root = join(sandbox, "flat-variants");
+    for (const [directory, body] of [["first", "first"], ["second", "second"]] as const) {
+      await mkdir(join(root, directory), { recursive: true });
+      await writeFile(join(root, directory, "SKILL.md"), `---\nname: duplicate\n---\n\n${body}\n`);
+    }
+
+    await expect(resolveSource(root)).rejects.toMatchObject({
+      code: "AMBIGUOUS_SKILL_VARIANT",
+      details: { name: "duplicate" },
+    });
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("rejects case-colliding names in a flat collection", async () => {
+    const root = join(sandbox, "flat-case-collision");
+    await mkdir(join(root, "first"), { recursive: true });
+    await mkdir(join(root, "second"), { recursive: true });
+    await writeFile(join(root, "first/SKILL.md"), "---\nname: React\n---\n");
+    await writeFile(join(root, "second/SKILL.md"), "---\nname: react\n---\n");
+
+    await expect(resolveSource(root)).rejects.toMatchObject({ code: "DUPLICATE_SKILL" });
+    expect(await pathExists(home)).toBe(false);
+  });
+
+  it("returns no skills when only nested root descendants contain skills", async () => {
+    const root = join(sandbox, "nested-only-flat-collection");
+    await mkdir(join(root, "third-party/nested-skill"), { recursive: true });
+    await writeFile(join(root, "third-party/nested-skill/SKILL.md"), "---\nname: nested-skill\n---\n");
+
+    await expect(resolveSource(root)).rejects.toMatchObject({ code: "NO_SKILLS_FOUND" });
+    expect(await pathExists(home)).toBe(false);
   });
 
   it("discovers immediate child skills in a selected collection", async () => {
