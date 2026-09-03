@@ -284,8 +284,15 @@ async function discoverSkills(root: string, rootFallbackName?: string): Promise<
     directories.push(...entries.filter((entry) => entry.isDirectory()).map((entry) => join(collectionRoot, entry.name)));
   }
 
-  const found = (await Promise.all(directories.map((directory) => candidateAt(directory, root)))).filter((skill): skill is SkillCandidate => skill !== null);
-  return finalizeCandidates(found);
+  const collectionSkills = (await Promise.all(directories.map((directory) => candidateAt(directory, root)))).filter((skill): skill is SkillCandidate => skill !== null);
+  if (collectionSkills.length) return finalizeCandidates(collectionSkills);
+
+  const rootEntries = await readdir(root, { withFileTypes: true });
+  const rootDirectories = rootEntries
+    .filter((entry) => entry.isDirectory() && entry.name !== ".git")
+    .map((entry) => join(root, entry.name));
+  const rootSkills = (await Promise.all(rootDirectories.map((directory) => candidateAt(directory, root)))).filter((skill): skill is SkillCandidate => skill !== null);
+  return finalizeCandidates(rootSkills);
 }
 
 async function selectSourcePath(root: string, selectedPath: string): Promise<string> {
