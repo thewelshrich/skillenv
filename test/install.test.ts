@@ -124,6 +124,15 @@ describe("installer", () => {
     });
   });
 
+  it("reports the package manifest version", async () => {
+    const packageManifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8"));
+    const { stdout } = await execFileAsync(process.execPath, ["--import", "tsx", "src/cli.ts", "--version"], {
+      cwd: process.cwd(),
+    });
+
+    expect(stdout.trim()).toBe(packageManifest.version);
+  });
+
   it("warns when add activates outside a Git repository", async () => {
     const source = await makeCollection([{ name: "react" }]);
     const nonGitProject = join(sandbox, "non-git-project");

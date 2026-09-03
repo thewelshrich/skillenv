@@ -1,6 +1,6 @@
 {
   "name": "skillenv",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Virtual environments for agent skills",
   "type": "module",
   "bin": {
