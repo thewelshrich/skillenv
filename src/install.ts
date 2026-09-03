@@ -10,6 +10,7 @@ export type SkillSelection = { kind: "all" } | { kind: "named"; names: string[] 
 
 export interface InstallRequest {
   source?: string;
+  path?: string;
   selection?: SkillSelection;
   target?: TargetDecision;
   activate?: boolean;
@@ -21,6 +22,7 @@ export interface InstallRequest {
 
 export interface InstallPlan {
   source: string;
+  path: string | null;
   skills: string[];
   replacing: string[];
   unchanged: string[];
@@ -55,6 +57,7 @@ function selectCandidates(source: ResolvedSource, selection: SkillSelection | un
 
 export function installPlanLines(plan: InstallPlan): string[] {
   const lines = [`Skills (${plan.skills.length}): ${plan.skills.join(", ")}`, "Target: personal library"];
+  if (plan.path) lines.splice(1, 0, `Path: ${plan.path}`);
   if (plan.replacing.length) lines.push(`Replace: ${plan.replacing.join(", ")}`);
   if (plan.unchanged.length) lines.push(`Already current: ${plan.unchanged.join(", ")}`);
   if (plan.target.kind === "environment") lines.push(`Environment: ${plan.target.create ? "create" : "update"} ${plan.target.name}`);
@@ -71,8 +74,8 @@ export async function install(request: InstallRequest, interaction?: InstallInte
     const sourceInput = request.source ?? (interaction ? await interaction.source() : requireInput("A source is required"));
     if (!sourceInput.trim()) requireInput("A source is required");
     source = interaction
-      ? await interaction.task("Resolving source…", () => resolveSource(sourceInput))
-      : await resolveSource(sourceInput);
+      ? await interaction.task("Resolving source…", () => resolveSource(sourceInput, { path: request.path }))
+      : await resolveSource(sourceInput, { path: request.path });
     const selected = await selectCandidates(source, request.selection, interaction);
     if (!selected.length) throw new SkillenvError("Select at least one skill", "SKILL_SELECTION_INVALID");
 
@@ -113,6 +116,7 @@ export async function install(request: InstallRequest, interaction?: InstallInte
 
     const plan: InstallPlan = {
       source: sanitizeSourceInput(source.input),
+      path: source.selectedPath,
       skills: selected.map((skill) => skill.name),
       replacing: inspection.conflicts,
       unchanged: inspection.unchanged,

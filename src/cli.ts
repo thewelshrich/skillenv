@@ -12,8 +12,8 @@ const program = new Command();
 const arguments_ = process.argv.slice(2);
 const jsonAddMode = arguments_.includes("add") && arguments_.includes("--json");
 
-function printJsonError(code: string, message: string): void {
-  console.log(JSON.stringify({ status: "error", error: { code, message } }, null, 2));
+function printJsonError(code: string, message: string, details?: unknown): void {
+  console.log(JSON.stringify({ status: "error", error: { code, message, ...(details === undefined ? {} : { details }) } }, null, 2));
 }
 
 program
@@ -43,7 +43,7 @@ program.parseAsync().catch((error: unknown) => {
   }
   if (error instanceof SkillenvError || error instanceof ZodError) {
     const message = error instanceof ZodError ? error.issues.map((issue) => issue.message).join("; ") : error.message;
-    if (jsonAddMode) printJsonError(error instanceof SkillenvError ? error.code : "INVALID_INPUT", message);
+    if (jsonAddMode) printJsonError(error instanceof SkillenvError ? error.code : "INVALID_INPUT", message, error instanceof SkillenvError ? error.details : undefined);
     else console.error(`Error: ${message}`);
     process.exitCode = 1;
     return;

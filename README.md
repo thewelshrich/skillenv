@@ -105,8 +105,33 @@ Sources can be a local directory, GitHub shorthand, or a Git URL:
 owner/repository
 owner/repository#branch
 https://github.com/owner/repository.git
+https://github.com/owner/repository/tree/main/path/to/skill
 git@github.com:owner/repository.git
 ```
+
+When given a repository root, Skillenv discovers immediate child skills in these collection directories, in precedence order:
+
+```text
+skills/
+.agents/skills/
+.claude/skills/
+.github/skills/
+```
+
+Identical mirrors are coalesced. If copies with the same skill name differ, Skillenv reports the available variants so one can be selected with `--path`.
+
+Select a skill or collection nested inside any source with `--path`:
+
+```bash
+skillenv add pbakaus/impeccable \
+  --path .agents/skills/impeccable \
+  --all \
+  --env frontend \
+  --yes
+```
+
+Paths are relative to the source root. A selected directory can be one skill or a collection whose immediate child directories are skills.
+GitHub tree URLs treat the first segment after `/tree/` as the ref. For refs containing `/`, use `owner/repository#feature/name --path path/to/skill`.
 
 Run `skillenv add --help` for selection, environment, activation, dry-run, and JSON options. In a non-interactive shell, Skillenv never prompts: provide `--skill <name>` or `--all`, choose an environment or `--library-only`, and pass `--yes`.
 

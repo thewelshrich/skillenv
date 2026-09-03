@@ -14,6 +14,7 @@ export function registerAddCommands(program: Command): void {
     .command("add")
     .description("Discover and install skills into your library and environments")
     .argument("[source]", "local directory, owner/repo, or Git URL")
+    .option("--path <path>", "skill directory or collection within the source")
     .option("-s, --skill <name>", "skill to install (repeatable)", collect, [])
     .option("--all", "install every discovered skill")
     .option("-e, --env <name>", "add to an existing environment")
@@ -42,6 +43,7 @@ export function registerAddCommands(program: Command): void {
       const activationWasSpecified = command.getOptionValueSource("activate") === "cli";
       const request: InstallRequest = {
         source,
+        path: options.path,
         selection,
         target,
         activate: activationWasSpecified ? options.activate : undefined,
@@ -65,12 +67,13 @@ export function registerAddCommands(program: Command): void {
       }
       } catch (error) {
         if (!options.json) throw error;
-        const value = error as { code?: unknown; message?: unknown };
+        const value = error as { code?: unknown; message?: unknown; details?: unknown };
         console.log(JSON.stringify({
           status: "error",
           error: {
             code: typeof value.code === "string" ? value.code : "SKILLENV_ERROR",
             message: typeof value.message === "string" ? value.message : "Unknown error",
+            ...(value.details === undefined ? {} : { details: value.details }),
           },
         }, null, 2));
         process.exitCode = 1;

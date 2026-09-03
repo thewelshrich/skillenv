@@ -1,5 +1,5 @@
 export class SkillenvError extends Error {
-  constructor(message: string, readonly code = "SKILLENV_ERROR") {
+  constructor(message: string, readonly code = "SKILLENV_ERROR", readonly details?: unknown) {
     super(message);
     this.name = "SkillenvError";
   }
