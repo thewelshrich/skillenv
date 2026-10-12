@@ -3,99 +3,88 @@
 [![CI](https://github.com/thewelshrich/skillenv/actions/workflows/ci.yml/badge.svg)](https://github.com/thewelshrich/skillenv/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Virtual environments for agent skills.
+**Virtual environments for agent skills.**
 
-Keep one personal skill library. Group skills into named environments. Activate only the environment the current project needs.
+Keep one personal skill library, group skills into named environments, and activate the set you need in each project.
 
-```console
-$ skillenv add vercel-labs/agent-skills
+Reuse environments across projects and switch sets as your work changes. Skillenv copies skills into your coding agent's discovery directories and locally excludes them from Git, keeping your personal setup out of shared repository configuration.
 
-┌  skillenv
-│
-◇  Resolving source
-│
-◆  Select skills to install
-│  ◉ vercel-react-best-practices
-│  ◉ web-design-guidelines
-│
-◆  Where should these skills live?
-│  ● frontend
-│  ○ Create a new environment…
-│  ○ Library only
-│
-◇  Ready
-│  2 skills → personal library
-│  Update environment frontend
-│  Activate in /Users/you/Code/my-app
-│
-◆  Continue?
-│  Yes
-│
-└  Installed 2 skills into frontend
-```
+## Quick start
 
-The same workflow remains completely scriptable:
-
-```bash
-skillenv add vercel-labs/agent-skills \
-  --skill web-design-guidelines \
-  --env frontend \
-  --activate \
-  --yes
-```
-
-Switch environments whenever your work changes:
-
-```console
-$ skillenv use backend
-Activated backend in /Users/you/Code/my-app
-
-$ skillenv deactivate
-Deactivated backend
-```
-
-Skillenv materialises real copies into the project paths coding agents already discover:
-
-```text
-.agents/skills/       Codex, Cursor, Gemini CLI, OpenCode, Copilot
-.claude/skills/       Claude Code compatibility mirror
-```
-
-Those copies are local to you. In Git repositories, Skillenv records them in `.git/info/exclude`, not `.gitignore`, so it does not alter the repository for anyone else.
-
-## Install
-
-Skillenv requires Node.js 20.12 or newer.
+Requires Node.js 20.12+ and Git for remote sources.
 
 ```bash
 npm install -g skillenv
-```
 
-For local development:
+# Add a skill to your library and create an environment
+skillenv add vercel-labs/agent-skills \
+  --skill web-design-guidelines \
+  --create-env frontend \
+  --yes
 
-```bash
-npm install
-npm run build
-npm link
-```
-
-## Commands
-
-```text
-skillenv add [source] [options]
-skillenv list
-
-skillenv env create <name>
-skillenv env add <environment> <skill>
-skillenv env remove <environment> <skill>
-skillenv env show <name>
-skillenv env list
-skillenv env delete <name>
-
-skillenv use <environment>
+# From your project directory
+skillenv use frontend
 skillenv status
 skillenv deactivate
 ```
+
+Run `skillenv use frontend` in any project to reuse the environment. It stays active there until you switch or deactivate it.
+
+## Everyday use
+
+| Command | What it does |
+| --- | --- |
+| `skillenv use <environment>` | Activate, switch, or refresh this project's environment |
+| `skillenv status` | Show the environment and detect modified or missing copies |
+| `skillenv deactivate` | Remove the active environment's project copies |
+| `skillenv list` | List skills in your personal library |
+| `skillenv env list` | List saved environments |
+| `skillenv env show <name>` | Show the skills in an environment |
+
+Build another environment from installed skills:
+
+```bash
+skillenv env create review
+skillenv env add review web-design-guidelines
+skillenv use review
+```
+
+After changing membership with `skillenv env add` or `skillenv env remove <environment> <skill>`, rerun `skillenv use <environment>` to refresh project copies. `skillenv env delete <name>` deletes a definition; deactivate its project copies separately.
+
+## Adding skills
+
+Choose skills, select or create an environment, and optionally activate it interactively:
+
+```bash
+skillenv add vercel-labs/agent-skills
+```
+
+For scripts, select `--skill <name>` or `--all`, choose a destination, and pass `--yes`:
+
+- `--create-env <name>` creates a new environment.
+- `--env <name>` adds to an existing environment.
+- `--library-only` installs without changing an environment.
+
+Add `--activate` to activate or refresh the environment here. `--dry-run` previews installation; `--json` provides machine-readable output. See `skillenv add --help` for all options. Non-interactive shells never prompt.
+
+## How it works
+
+Your library lives in `~/.skillenv/skills/`. Environments are named skill lists under `~/.skillenv/environments/`.
+
+Activation copies skills into the project's `.agents/skills/` and `.claude/skills/` directories for agents that discover those paths, including Codex and Claude Code. Ownership and content hashes are recorded in `.skillenv/state.json`.
+
+Generated files are locally excluded through `.git/info/exclude`; the shared `.gitignore` stays unchanged. Activation also works outside Git, without those excludes.
+
+**An environment controls only Skillenv's managed skills.** Existing project and global skills remain subject to your agent's normal discovery rules.
+
+Skillenv preserves unmanaged skills and refuses to overwrite or delete modified project copies. Edit your library copies and rerun `skillenv use <environment>` to refresh a project. Changes to project copies are reported as drift and block switching or deactivation.
+
+Remote skills run with your coding agent's permissions. Review their `SKILL.md` and supporting files before using them.
+
+## Source reference
+
+<details>
+<summary>Source formats, nested skills, and discovery rules</summary>
 
 Sources can be a local directory, GitHub shorthand, or a Git URL:
 
@@ -109,7 +98,7 @@ https://github.com/owner/repository/tree/main/path/to/skill
 git@github.com:owner/repository.git
 ```
 
-When given a repository root, Skillenv discovers immediate child skills in these collection directories, in precedence order:
+At a repository root, Skillenv looks for immediate child skills in these directories, in precedence order:
 
 ```text
 skills/
@@ -118,68 +107,35 @@ skills/
 .github/skills/
 ```
 
-If none of those directories contain skills, Skillenv treats immediate child directories with a `SKILL.md` as a flat collection. This fallback is one level deep; nested packs remain available through `--path` rather than being discovered recursively.
+If none contain skills, it checks immediate child directories of the source root for a `SKILL.md`. Discovery is one level deep.
 
-Identical mirrors are coalesced. If copies with the same skill name differ, Skillenv reports the available variants so one can be selected with `--path`.
-
-Select a skill or collection nested inside any source with `--path`:
+Use `--path` to select a nested skill or collection relative to the source root:
 
 ```bash
-skillenv add pbakaus/impeccable \
-  --path .agents/skills/impeccable \
+skillenv add owner/repository \
+  --path path/to/skill-or-collection \
   --all \
-  --env frontend \
+  --library-only \
   --yes
 ```
 
-Paths are relative to the source root. A selected directory can be one skill or a collection whose immediate child directories are skills.
+Identical mirrored skills are combined into one choice. If skills with the same name differ, Skillenv reports the variants so you can select one with `--path`.
+
 GitHub tree URLs treat the first segment after `/tree/` as the ref. For refs containing `/`, use `owner/repository#feature/name --path path/to/skill`.
 
-Run `skillenv add --help` for selection, environment, activation, dry-run, and JSON options. In a non-interactive shell, Skillenv never prompts: provide `--skill <name>` or `--all`, choose an environment or `--library-only`, and pass `--yes`.
+Git installs record the resolved commit and content hash in `~/.skillenv/metadata/`, outside project copies.
 
-## How it works
-
-Your library and environments live outside projects:
-
-```text
-~/.skillenv/
-├── skills/
-│   ├── react-best-practices/
-│   └── playwright/
-├── environments/
-│   └── frontend.json
-└── metadata/
-    ├── react-best-practices.json
-    └── playwright.json
-```
-
-Source metadata is kept outside skill directories, so it is never materialised into projects. Git installs record the resolved commit and content hash for provenance and future updates.
-
-Activation writes a small, locally excluded ownership manifest to `.skillenv/state.json` in the project. Every managed directory has a content hash. Before switching or deactivating, Skillenv verifies those hashes.
-
-This gives Skillenv one strict rule:
-
-> Never overwrite or delete a path it cannot prove it owns.
-
-If you edit a materialised copy, Skillenv reports drift and refuses to remove it. Your source of truth is the library copy under `~/.skillenv/skills`; update that copy and reactivate the environment to deploy it.
-
-Remote skills are untrusted instructions that run with your coding agent's permissions. Review their `SKILL.md` and supporting files before using them.
-
-## Scope
-
-Skillenv is a filesystem CLI for local coding agents. It does not manage MCP servers, prompts, hooks, agent configuration, accounts, marketplaces, cloud workers, or team-wide tracked configuration.
-
-For a non-Git directory, activation still works, but Skillenv cannot hide its generated files from version control and prints a note explaining that.
+</details>
 
 ## Development
 
 ```bash
-npm test
-npm run typecheck
-npm run build
+npm install
+npm run check
+npm link
 ```
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and project boundaries.
+`npm run check` runs typechecking, tests, and the build. Use `npm run dev -- <command>` to run from source. See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute.
 
 ## License
 
