@@ -329,25 +329,32 @@ async function discoverSource(root: string, selectedPath: string | undefined, ro
   return selectedPath ? discoverSelectedPath(root, selectedPath) : discoverSkills(root, rootFallbackName);
 }
 
-export async function resolveSource(input: string, options: ResolveSourceOptions = {}): Promise<ResolvedSource> {
-  const explicitPath = options.path === undefined ? undefined : normalizeSourcePath(options.path);
+export interface FetchedSource {
+  input: string;
+  kind: "local" | "git";
+  root: string;
+  revision: string | null;
+  cleanup(): Promise<void>;
+}
+
+interface FetchedSourceDetails extends FetchedSource {
+  treePath?: string;
+  rootFallbackName?: string;
+}
+
+async function fetchSourceDetails(input: string, explicitPath?: string): Promise<FetchedSourceDetails> {
   const local = resolve(input);
   const localStat = await lstat(local).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
     throw error;
   });
   if (localStat?.isSymbolicLink()) throw new SkillenvError(`Symbolic link sources are not supported: ${input}`, "INVALID_SKILL");
-  if (localStat?.isDirectory()) {
-    const skills = await discoverSource(local, explicitPath);
-    if (!skills.length) throw new SkillenvError(`No skills found in ${explicitPath ? `${input} at ${explicitPath}` : input}`, "NO_SKILLS_FOUND");
-    return { input, kind: "local", root: local, selectedPath: explicitPath ?? null, revision: null, skills, cleanup: async () => {} };
-  }
+  if (localStat?.isDirectory()) return { input, kind: "local", root: local, revision: null, cleanup: async () => {} };
   if (localStat) throw new SkillenvError(`Local source is not a directory: ${input}`, "SOURCE_UNSUPPORTED");
 
   const remote = gitUrl(input);
   if (!remote) throw new SkillenvError(`Source is neither a local directory nor a supported Git source: ${input}`, "SOURCE_UNSUPPORTED");
   if (explicitPath && remote.path) throw new SkillenvError("Use either --path or a GitHub tree URL path, not both", "INVALID_INPUT");
-  const selectedPath = explicitPath ?? remote.path;
   const temporaryRoot = await mkdtemp(join(tmpdir(), "skillenv-source-"));
   const checkout = join(temporaryRoot, "repository");
   try {
@@ -367,15 +374,13 @@ export async function resolveSource(input: string, options: ResolveSourceOptions
     }
     const { stdout } = await execFileAsync("git", ["-C", checkout, "rev-parse", "HEAD"], { encoding: "utf8" });
     const repositoryName = basename(new URL(remote.url.replace(/^git@([^:]+):/, "ssh://$1/")).pathname).replace(/\.git$/, "");
-    const skills = await discoverSource(checkout, selectedPath, repositoryName);
-    if (!skills.length) throw new SkillenvError(`No skills found in ${selectedPath ? `${input} at ${selectedPath}` : input}`, "NO_SKILLS_FOUND");
     return {
       input,
       kind: "git",
       root: checkout,
-      selectedPath: selectedPath ?? null,
       revision: stdout.trim(),
-      skills,
+      treePath: remote.path,
+      rootFallbackName: repositoryName,
       cleanup: () => rm(temporaryRoot, { recursive: true, force: true }),
     };
   } catch (error) {
@@ -384,4 +389,37 @@ export async function resolveSource(input: string, options: ResolveSourceOptions
     const detail = (error as { stderr?: string }).stderr?.trim();
     throw new SkillenvError(`Could not fetch ${sanitizeSourceInput(input)}${detail ? `: ${sanitizeSourceText(detail)}` : ""}`, "SOURCE_UNREACHABLE");
   }
+}
+
+export async function fetchSource(input: string): Promise<FetchedSource> {
+  const { treePath: _treePath, rootFallbackName: _rootFallbackName, ...source } = await fetchSourceDetails(input);
+  return source;
+}
+
+export async function resolveSource(input: string, options: ResolveSourceOptions = {}): Promise<ResolvedSource> {
+  const explicitPath = options.path === undefined ? undefined : normalizeSourcePath(options.path);
+  const { treePath, rootFallbackName, ...source } = await fetchSourceDetails(input, explicitPath);
+  try {
+    const selectedPath = explicitPath ?? treePath;
+    const skills = await discoverSource(source.root, selectedPath, rootFallbackName);
+    if (!skills.length) throw new SkillenvError(`No skills found in ${selectedPath ? `${input} at ${selectedPath}` : input}`, "NO_SKILLS_FOUND");
+    return { ...source, selectedPath: selectedPath ?? null, skills };
+  } catch (error) {
+    await source.cleanup();
+    throw error;
+  }
+}
+
+// Finds the skill an earlier install recorded at sourcePath, or null when the source no longer has one there.
+export async function findSkillAtSourcePath(source: FetchedSource, sourcePath: string, fallbackName: string): Promise<SkillCandidate | null> {
+  let directory = source.root;
+  if (sourcePath !== ".") {
+    try {
+      directory = await selectSourcePath(source.root, normalizeSourcePath(sourcePath));
+    } catch (error) {
+      if (error instanceof SkillenvError && error.code === "SOURCE_PATH_NOT_FOUND") return null;
+      throw error;
+    }
+  }
+  return candidateAt(directory, source.root, fallbackName);
 }

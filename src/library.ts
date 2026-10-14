@@ -6,7 +6,7 @@ import { withEnvironmentLock } from "./environments.js";
 import { copySkillDirectory, entryExists, fingerprintEntry, hashDirectory, inferSkillName, pathExists, readJson, writeJson } from "./fs.js";
 import { environmentsDir, libraryDir, metadataDir, transactionsDir } from "./paths.js";
 import { lockOwnerIsActive, startLockHeartbeat } from "./locks.js";
-import { environmentSchema, nameSchema, type Environment, type SkillMetadata } from "./schema.js";
+import { environmentSchema, nameSchema, skillMetadataSchema, type Environment, type SkillMetadata } from "./schema.js";
 import { sanitizeSourceInput } from "./sources.js";
 
 export async function addSkill(sourceInput: string, options: { name?: string; force?: boolean } = {}): Promise<string> {
@@ -46,6 +46,14 @@ export async function requireSkill(nameInput: string): Promise<string> {
   const path = join(libraryDir(), name);
   if (!(await pathExists(path))) throw new SkillenvError(`Unknown skill '${name}'`);
   return path;
+}
+
+export async function readSkillMetadata(name: string): Promise<SkillMetadata | null> {
+  const path = join(metadataDir(), `${name}.json`);
+  if (!(await pathExists(path))) return null;
+  const result = skillMetadataSchema.safeParse(await readJson(path));
+  if (!result.success) throw new SkillenvError(`Invalid skill metadata: ${path}`, "INVALID_METADATA");
+  return result.data;
 }
 
 export interface PreparedSkill {

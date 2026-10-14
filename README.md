@@ -38,6 +38,7 @@ Run `skillenv use frontend` in any project to reuse the environment. It stays ac
 | `skillenv status` | Show the environment and detect modified or missing copies |
 | `skillenv deactivate` | Remove the active environment's project copies |
 | `skillenv list` | List skills in your personal library |
+| `skillenv update [skills...]` | Update library skills from their sources |
 | `skillenv env list` | List saved environments |
 | `skillenv env show <name>` | Show the skills in an environment |
 
@@ -66,6 +67,20 @@ For scripts, select `--skill <name>` or `--all`, choose a destination, and pass 
 - `--library-only` installs without changing an environment.
 
 Add `--activate` to activate or refresh the environment here. `--dry-run` previews installation; `--json` provides machine-readable output. See `skillenv add --help` for all options. Non-interactive shells never prompt.
+
+## Updating skills
+
+Skillenv records where each skill came from. `skillenv update` fetches those sources again and updates any library skills whose content has changed:
+
+```bash
+skillenv update              # every skill in your library
+skillenv update react        # only the named skills
+skillenv update --dry-run    # preview without writing
+```
+
+Git sources follow the ref they were installed from. Sources pinned to a commit stay put. Local sources are re-read from their original directory.
+
+If you have edited a library copy since installing it, `update` skips it rather than discard your changes; pass `--force` to replace it. Updating changes your library only. Rerun `skillenv use <environment>` in a project to deploy the new versions there.
 
 ## How it works
 
