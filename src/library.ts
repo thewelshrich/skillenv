@@ -1,20 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { SkillenvError } from "./errors.js";
 import { withEnvironmentLock } from "./environments.js";
-import { copySkillDirectory, fingerprintEntry, hashDirectory, inferSkillName, pathExists, readJson, writeJson } from "./fs.js";
+import { copySkillDirectory, entryExists, fingerprintEntry, hashDirectory, inferSkillName, pathExists, readJson, writeJson } from "./fs.js";
 import { environmentsDir, libraryDir, metadataDir, transactionsDir } from "./paths.js";
 import { lockOwnerIsActive, startLockHeartbeat } from "./locks.js";
 import { environmentSchema, nameSchema, type Environment, type SkillMetadata } from "./schema.js";
 import { sanitizeSourceInput } from "./sources.js";
-
-async function entryExists(path: string): Promise<boolean> {
-  return lstat(path).then(() => true).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return false;
-    throw error;
-  });
-}
 
 export async function addSkill(sourceInput: string, options: { name?: string; force?: boolean } = {}): Promise<string> {
   const source = resolve(sourceInput);

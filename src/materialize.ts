@@ -1,15 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import { adapters, adapterSkillPath, isAdapterSkillPath } from "./adapters.js";
 import { readEnvironment, withEnvironmentLock } from "./environments.js";
 import { SkillenvError } from "./errors.js";
-import { copyDirectory, hashDirectory, pathExists, readJson, removeEmptyParents, writeJson } from "./fs.js";
+import { copyDirectory, entryExists, hashDirectory, pathExists, readJson, removeEmptyParents, writeJson } from "./fs.js";
 import { findProject, updateGitExclude, type Project } from "./git.js";
 import { requireSkill, withLibraryReadLock } from "./library.js";
 import { lockOwnerIsActive, startLockHeartbeat } from "./locks.js";
-import { nameSchema, projectStateSchema, type Environment, type ProjectState } from "./schema.js";
+import { managedEntrySchema, projectStateSchema, type Environment, type ProjectState } from "./schema.js";
 import { skillenvHome } from "./paths.js";
 
 function statePath(root: string): string {
@@ -43,13 +43,6 @@ async function assertProjectMetadataRoot(root: string): Promise<void> {
   if (entry && (entry.isSymbolicLink() || !entry.isDirectory())) {
     throw new SkillenvError("Refusing unsafe project metadata root: .skillenv", "RECOVERY_REQUIRED");
   }
-}
-
-async function entryExists(path: string): Promise<boolean> {
-  return lstat(path).then(() => true).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return false;
-    throw error;
-  });
 }
 
 function resolveManagedPath(root: string, path: string, skill: string): string {
@@ -115,30 +108,19 @@ export interface ActivationResult {
   previousEnvironment: string | null;
 }
 
-interface ActivationJournal {
-  version: 1;
-  hashVersion?: 2;
-  phase: "prepared" | "committed";
-  previous: ProjectState | null;
-  planned: Array<{ skill: string; path: string; hash: string }>;
-}
+const activationJournalSchema = z.object({
+  version: z.literal(1),
+  hashVersion: z.literal(2).optional(),
+  phase: z.enum(["prepared", "committed"]),
+  previous: projectStateSchema.nullable(),
+  planned: z.array(managedEntrySchema.refine((entry) => isAdapterSkillPath(entry.path, entry.skill))),
+});
+
+type ActivationJournal = z.infer<typeof activationJournalSchema>;
 
 function parseActivationJournal(value: unknown): ActivationJournal | null {
-  if (!value || typeof value !== "object") return null;
-  const candidate = value as Partial<ActivationJournal>;
-  if (candidate.version !== 1 || (candidate.hashVersion !== undefined && candidate.hashVersion !== 2) || (candidate.phase !== "prepared" && candidate.phase !== "committed") || !Array.isArray(candidate.planned)) return null;
-  const previous = candidate.previous === null ? null : projectStateSchema.safeParse(candidate.previous);
-  if (previous !== null && !previous.success) return null;
-  const planned: Array<{ skill: string; path: string; hash: string }> = [];
-  for (const entry of candidate.planned) {
-    if (!entry || typeof entry !== "object") return null;
-    const item = entry as { skill?: unknown; path?: unknown };
-    const skill = nameSchema.safeParse(item.skill);
-    const hash = (entry as { hash?: unknown }).hash;
-    if (!skill.success || typeof item.path !== "string" || !isAdapterSkillPath(item.path, skill.data) || typeof hash !== "string" || !/^[a-f0-9]{64}$/.test(hash)) return null;
-    planned.push({ skill: skill.data, path: item.path, hash });
-  }
-  return { version: 1, ...(candidate.hashVersion === 2 ? { hashVersion: 2 as const } : {}), phase: candidate.phase, previous: previous === null ? null : previous.data, planned };
+  const result = activationJournalSchema.safeParse(value);
+  return result.success ? result.data : null;
 }
 
 async function acquireProjectLock(root: string): Promise<() => Promise<void>> {
@@ -214,9 +196,7 @@ async function recoverActivationTransactions(project: Project): Promise<void> {
             if (previous && previousHash === previous.hash && !backupExists) {
               // A prior recovery pass already restored this path.
             } else if (plannedHash === planned.hash) await rm(destination, { recursive: true, force: true });
-            else if (!(previous && previousHash === previous.hash && backup && !backupExists)) {
-              throw new SkillenvError(`Interrupted activation path was modified: ${planned.path}`, "RECOVERY_REQUIRED");
-            }
+            else throw new SkillenvError(`Interrupted activation path was modified: ${planned.path}`, "RECOVERY_REQUIRED");
           }
         }
       }
@@ -279,7 +259,7 @@ async function activateLocked(environment: Environment, project: Project): Promi
 
   for (const entry of planned) {
     const destination = await checkedManagedPath(project.root, entry.path, entry.skill);
-    if ((await pathExists(destination)) && !previousPaths.has(entry.path)) {
+    if ((await entryExists(destination)) && !previousPaths.has(entry.path)) {
       throw new SkillenvError(`Refusing to overwrite unmanaged skill: ${entry.path}`);
     }
   }
