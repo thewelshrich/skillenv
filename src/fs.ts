@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { SkillenvError } from "./errors.js";
 
 export async function pathExists(path: string): Promise<boolean> {
@@ -13,6 +13,14 @@ export async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+// Unlike pathExists, this does not follow symbolic links, so a dangling link still counts as an entry.
+export async function entryExists(path: string): Promise<boolean> {
+  return lstat(path).then(() => true).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+}
+
 export async function readJson(path: string): Promise<unknown> {
   try {
     return JSON.parse(await readFile(path, "utf8"));
@@ -23,10 +31,14 @@ export async function readJson(path: string): Promise<unknown> {
 }
 
 export async function writeJson(path: string, value: unknown): Promise<void> {
+  await writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+export async function writeFileAtomic(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
   try {
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
+    await writeFile(temporary, content);
     await rename(temporary, path);
   } finally {
     await rm(temporary, { force: true }).catch(() => {});
@@ -109,12 +121,17 @@ export async function fingerprintEntry(root: string): Promise<string> {
 
 export async function removeEmptyParents(start: string, stop: string): Promise<void> {
   let current = start;
-  while (current.startsWith(stop) && current !== stop) {
+  while (isStrictlyInside(current, stop)) {
     const entries = await readdir(current).catch(() => []);
     if (entries.length > 0) return;
     await rmdir(current);
     current = dirname(current);
   }
+}
+
+function isStrictlyInside(path: string, parent: string): boolean {
+  const relativePath = relative(parent, path);
+  return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath);
 }
 
 export function inferSkillName(source: string): string {
