@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { lstat, readFile, readlink } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
+import { SkillenvError } from "./errors.js";
 import { writeFileAtomic } from "./fs.js";
 
 const execFileAsync = promisify(execFile);
@@ -49,6 +50,20 @@ function stripSkillenvBlock(content: string): string {
   return output.join("\n");
 }
 
+// Follow symbolic links so an atomic rename updates the shared target instead of replacing the link.
+async function resolveWriteTarget(path: string): Promise<string> {
+  let current = path;
+  for (let depth = 0; depth < 40; depth += 1) {
+    const entry = await lstat(current).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!entry?.isSymbolicLink()) return current;
+    current = resolve(dirname(current), await readlink(current));
+  }
+  throw new SkillenvError(`Too many symbolic links resolving ${path}`);
+}
+
 export async function updateGitExclude(project: Project, managedPaths: string[]): Promise<void> {
   if (!project.gitExclude) return;
   const existing = await readFile(project.gitExclude, "utf8").catch((error: NodeJS.ErrnoException) => {
@@ -63,5 +78,5 @@ export async function updateGitExclude(project: Project, managedPaths: string[])
     next += `${next ? "\n" : ""}${block}\n`;
   }
   if (next === existing) return;
-  await writeFileAtomic(project.gitExclude, next);
+  await writeFileAtomic(await resolveWriteTarget(project.gitExclude), next);
 }

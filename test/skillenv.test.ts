@@ -434,6 +434,26 @@ describe("skillenv", () => {
     expect(await readFile(join(project, ".git/info/exclude"), "utf8")).toBe(`${original}*.tmp\n`);
   });
 
+  it("updates the target of a symlinked Git exclude without replacing the link", async () => {
+    const shared = join(sandbox, "shared-exclude");
+    const exclude = join(project, ".git/info/exclude");
+    await writeFile(shared, "*.local\n");
+    await rm(exclude, { force: true });
+    await symlink(shared, exclude);
+    await addSkill(await makeSkill("react"));
+    await addEnvironment("frontend", ["react"]);
+
+    await activate("frontend", project);
+
+    expect((await lstat(exclude)).isSymbolicLink()).toBe(true);
+    expect(await readFile(shared, "utf8")).toContain("/.agents/skills/react/");
+
+    await deactivate(project);
+
+    expect((await lstat(exclude)).isSymbolicLink()).toBe(true);
+    expect(await readFile(shared, "utf8")).toBe("*.local\n");
+  });
+
   it("refuses to replace a dangling symlink at an activation destination", async () => {
     await addSkill(await makeSkill("react"));
     await addEnvironment("frontend", ["react"]);
