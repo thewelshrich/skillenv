@@ -5,9 +5,26 @@
 
 **Virtual environments for agent skills.**
 
-Keep one personal skill library, group skills into named environments, and activate the set you need in each project.
+Keep one personal skill library, group skills into named environments, and activate the set you need in each project. Works with Claude Code, Codex, and other agents that read `.claude/skills/` or `.agents/skills/`.
 
-Reuse environments across projects and switch sets as your work changes. Skillenv copies skills into your coding agent's discovery directories and locally excludes them from Git, keeping your personal setup out of shared repository configuration.
+```console
+$ skillenv use frontend
+Activated frontend in ~/code/my-app
+12 skills available to supported agents.
+
+$ git status
+nothing to commit, working tree clean
+```
+
+## Why
+
+[Agent skills](https://agentskills.io) are folders of instructions your coding agent loads on demand. Collecting them is easy; deciding where to put them is not:
+
+- **Global skills load everywhere.** Put fifty skills in `~/.claude/skills/` and every project sees all fifty. Your agent reads every description, picks the wrong skill more often, and your game-dev skills turn up in your billing service.
+- **Project skills are shared.** Commit them to a repository and your personal setup becomes your team's configuration.
+- **Copying folders by hand doesn't scale.** Copies drift from their source, and nothing tells you which version a project has.
+
+Skillenv works like a Python virtualenv for skills. Your library lives in one place. Environments are named sets of skills (`frontend`, `marketing`, `review`). `skillenv use` copies a set into the current project, keeps it out of Git, and swaps it cleanly when you switch.
 
 ## Quick start
 
@@ -95,6 +112,16 @@ Generated files are locally excluded through `.git/info/exclude`; the shared `.g
 Skillenv preserves unmanaged skills and refuses to overwrite or delete modified project copies. Edit your library copies and rerun `skillenv use <environment>` to refresh a project. Changes to project copies are reported as drift and block switching or deactivation.
 
 Remote skills run with your coding agent's permissions. Review their `SKILL.md` and supporting files before using them.
+
+## FAQ
+
+**How is this different from `npx skills add`?** Installers like that put skills directly into a project or your global agent directory. Skillenv installs into a personal library and lets you activate different sets per project, switch between them, and remove them cleanly. You can install from the same sources.
+
+**Will my teammates see my skills?** No. Activated skills are excluded through `.git/info/exclude`, which is local to your clone. Nothing is added to `.gitignore` or committed.
+
+**What about skills already in the project or in `~/.claude/skills/`?** Skillenv leaves them alone. It manages only the copies it created and never overwrites or deletes a path it cannot prove it owns.
+
+**Why copy instead of symlink?** Copies are plain directories that any agent can read, and they don't change under a project when you edit or update your library. Recorded content hashes let Skillenv detect edits to project copies before it touches anything.
 
 ## Source reference
 
