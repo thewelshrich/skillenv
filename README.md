@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/thewelshrich/skillenv/actions/workflows/ci.yml/badge.svg)](https://github.com/thewelshrich/skillenv/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Follow @RichDevLab on X](https://img.shields.io/badge/follow-%40RichDevLab-black?logo=x)](https://x.com/RichDevLab)
 
 **Virtual environments for agent skills.**
 
