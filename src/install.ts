@@ -145,7 +145,8 @@ export async function install(request: InstallRequest, interaction?: InstallInte
       }]));
       libraryChange = await installLibrarySkills(
         selected,
-        { input: source.input, kind: source.kind, revision: source.revision },
+        // Record local sources as absolute paths so `skillenv update` works from any directory.
+        { input: source.kind === "local" ? source.root : source.input, kind: source.kind, revision: source.revision },
         { replace, allowedConflicts, approvedState },
       );
       if (target.kind === "environment") {
