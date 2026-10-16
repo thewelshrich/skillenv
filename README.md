@@ -7,14 +7,7 @@
 
 Keep one personal skill library, group skills into named environments, and activate the set you need in each project. Works with Claude Code, Codex, and other agents that read `.claude/skills/` or `.agents/skills/`.
 
-```console
-$ skillenv use frontend
-Activated frontend in ~/code/my-app
-12 skills available to supported agents.
-
-$ git status
-nothing to commit, working tree clean
-```
+![Activating a frontend environment, confirming Git sees no changes, switching to a review environment, and deactivating](https://raw.githubusercontent.com/thewelshrich/skillenv/main/demo/demo.gif)
 
 ## Why
 
@@ -177,7 +170,7 @@ npm run check
 npm link
 ```
 
-`npm run check` runs typechecking, tests, and the build. Use `npm run dev -- <command>` to run from source. See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute.
+`npm run check` runs typechecking, tests, and the build. Use `npm run dev -- <command>` to run from source. To re-record the demo, run `npm run build` and then `vhs demo/demo.tape`; it uses a sandbox in `/tmp/demo` and never touches `~/.skillenv`. See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute.
 
 ## License
 
