@@ -16,9 +16,9 @@ Keep one personal skill library, group skills into named environments, and activ
 
 - **Global skills load everywhere.** Put fifty skills in `~/.claude/skills/` and every project sees all fifty. Your agent reads every description, picks the wrong skill more often, and your game-dev skills turn up in your billing service.
 - **Project skills are shared.** Commit them to a repository and your personal setup becomes your team's configuration.
-- **Copying folders by hand doesn't scale.** Copies drift from their source, and nothing tells you which version a project has.
+- **Copying folders by hand doesn't scale.** The same skills end up maintained separately in every project that needs them. Copies drift from their source, and nothing tells you which version a project has.
 
-Skillenv works like a Python virtualenv for skills. Your library lives in one place. Environments are named sets of skills (`frontend`, `marketing`, `review`). `skillenv use` copies a set into the current project, keeps it out of Git, and swaps it cleanly when you switch.
+Skillenv works like a Python virtualenv for skills. Your library lives in one place. Environments are named sets of skills (`frontend`, `marketing`, `review`), and one environment can serve any number of projects. `skillenv use` copies a set into the current project, keeps it out of Git, and swaps it cleanly when you switch. Update a skill once in your library, then rerun `skillenv use` in any project to pick up the new version.
 
 ## Quick start
 
@@ -110,6 +110,8 @@ Remote skills run with your coding agent's permissions. Review their `SKILL.md` 
 ## FAQ
 
 **How is this different from `npx skills add`?** Installers like that put skills directly into a project or your global agent directory. Skillenv installs into a personal library and lets you activate different sets per project, switch between them, and remove them cleanly. You can install from the same sources.
+
+**Why a CLI and not an app?** You already work in a terminal, or next to one. Skillenv is a single command with no desktop app, account, registry, or background service. Your library and environments are plain files in `~/.skillenv/`, so you can inspect, script, or back them up however you like.
 
 **Will my teammates see my skills?** No. Activated skills are excluded through `.git/info/exclude`, which is local to your clone. Nothing is added to `.gitignore` or committed.
 
